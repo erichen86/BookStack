@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,10 @@ import (
 	"path"
 	"reflect"
 	"sync"
+
+	"github.com/TruthHun/BookStack/utils/html2md"
+
+	"github.com/mssola/user_agent"
 
 	"github.com/astaxie/beego/context"
 
@@ -39,19 +44,18 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/TruthHun/gotil/util"
 	"github.com/astaxie/beego"
-	"github.com/huichen/sego"
 
 	"github.com/TruthHun/gotil/cryptil"
-	"github.com/TruthHun/html2md"
 )
 
 //存储类型
 
 //更多存储类型有待扩展
 const (
-	StoreLocal  string = "local"
-	StoreOss    string = "oss"
-	VirtualRoot string = "virtualroot"
+	StoreLocal  = "local"
+	StoreOss    = "oss"
+	VirtualRoot = "virtualroot"
+	unknown     = "unknown"
 )
 
 //分词器
@@ -59,17 +63,14 @@ var (
 	Version     string = "unknown"
 	GitHash     string = "unknown"
 	BuildAt     string = "unknown"
-	Segmenter   sego.Segmenter
-	BasePath, _ = filepath.Abs(filepath.Dir(os.Args[0]))
-	StoreType   = beego.AppConfig.String("store_type") //存储类型
+	BasePath, _        = filepath.Abs(filepath.Dir(os.Args[0]))
+	StoreType          = beego.AppConfig.String("store_type") //存储类型
 	langs       sync.Map
+	httpTimeout = time.Duration(beego.AppConfig.DefaultInt("http_timeout", 30)) * time.Second
+	transfer    = strings.TrimRight(strings.TrimSpace(beego.AppConfig.String("http_transfer")), "/") + "/"
 )
 
 func init() {
-	//加载分词字典
-	go func() {
-		Segmenter.LoadDictionary(BasePath + "/dictionary/dictionary.txt")
-	}()
 	langs.Store("zh", "中文")
 	langs.Store("en", "英文")
 	langs.Store("other", "其他")
@@ -77,9 +78,15 @@ func init() {
 
 func PrintInfo() {
 	fmt.Println("Service: ", "BookStack")
-	fmt.Println("Version: ", Version)
-	fmt.Println("BuildAt: ", BuildAt)
-	fmt.Println("GitHash: ", GitHash)
+	if Version != unknown {
+		fmt.Println("Version: ", Version)
+	}
+	if BuildAt != unknown {
+		fmt.Println("BuildAt: ", BuildAt)
+	}
+	if GitHash != unknown {
+		fmt.Println("GitHash: ", GitHash)
+	}
 }
 
 func InitVirtualRoot() {
@@ -91,27 +98,6 @@ func GetLang(lang string) string {
 		return val.(string)
 	}
 	return "中文"
-}
-
-//分词
-//@param            str         需要分词的文字
-func SegWord(str interface{}) (wds string) {
-	//如果已经成功加载字典
-	if Segmenter.Dictionary() != nil {
-		wds = sego.SegmentsToString(Segmenter.Segment([]byte(fmt.Sprintf("%v", str))), true)
-		var wdslice []string
-		slice := strings.Split(wds, " ")
-		for _, wd := range slice {
-			w := strings.Split(wd, "/")[0]
-			if (strings.Count(w, "") - 1) >= 2 {
-				if i, _ := strconv.Atoi(w); i == 0 { //如果为0，则表示非数字
-					wdslice = append(wdslice, w)
-				}
-			}
-		}
-		wds = strings.Join(wdslice, ",")
-	}
-	return
 }
 
 //评分处理
@@ -146,24 +132,99 @@ func SendMail(conf *conf.SmtpConf, subject, email string, body string) error {
 func RenderDocumentById(id int) {
 	//使用chromium-browser
 	//	chromium-browser --headless --disable-gpu --screenshot --no-sandbox --window-size=320,480 http://www.bookstack.cn
-	link := "http://localhost:" + beego.AppConfig.DefaultString("httpport", "8080") + "/local-render?id=" + strconv.Itoa(id)
+	link := "http://localhost:" + beego.AppConfig.DefaultString("httpport", "8181") + "/local-render?id=" + strconv.Itoa(id)
 	name := beego.AppConfig.DefaultString("chrome", "chromium-browser")
 	args := []string{"--headless", "--disable-gpu", "--screenshot", "--no-sandbox", "--window-size=320,480", link}
-	if ok, _ := beego.AppConfig.Bool("puppeteer"); ok {
+	if ok := beego.AppConfig.DefaultBool("puppeteer", false); ok {
 		name = "node"
 		args = []string{"crawl.js", "--url", link}
 	}
 	cmd := exec.Command(name, args...)
 	beego.Info("render document by document_id:", cmd.Args)
 	// 超过10秒，杀掉进程，避免长期占用
-	time.AfterFunc(30*time.Second, func() {
-		if cmd.Process.Pid != 0 {
+	time.AfterFunc(httpTimeout, func() {
+		if cmd.Process != nil && cmd.Process.Pid != 0 {
 			cmd.Process.Kill()
 		}
 	})
 	if err := cmd.Run(); err != nil {
 		beego.Error(err)
 	}
+}
+
+const screenshotCoverJS = `'use strict';
+// 说明： 这段js是用来进行书籍封面截屏的，请勿随便删除或改动
+const puppeteer = require('puppeteer');
+const fs = require("fs");
+
+let args = process.argv.splice(2);
+let l=args.length;
+let url, identify,folder;
+
+for(let i=0;i<l;i++){
+    switch (args[i]){
+        case "--url":
+            url = args[i+1];
+            if (url==undefined){
+                url = "";
+            }
+            break;
+        case '--identify':
+            identify = args[i+1];
+            break;
+    }
+    i++;
+}
+
+async function screenshot() {
+    const browser = await puppeteer.launch({args: ['--no-sandbox', '--disable-setuid-sandbox'], headless: true, ignoreHTTPSErrors: true});
+    const page = await browser.newPage();
+    page.setViewport({width: 800, height: 1068}); // A4 宽高
+    folder="cache/books/"+identify+"/"
+    page.setExtraHTTPHeaders({
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,co;q=0.7,fr;q=0.6,zh-HK;q=0.5,zh-TW;q=0.4",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3766.2 Safari/537.36"
+    });
+
+    await page.goto(url, {"waitUntil" :  ['networkidle2', 'domcontentloaded'], "timeout":5000});
+    await page.screenshot({path: folder+'cover.png'});
+    await browser.close();
+}
+if (url && identify) screenshot();`
+
+// 生成
+func RenderCoverByBookIdentify(identify string) (err error) {
+	var args []string
+	shotJS := "cover.js"
+	if _, err = os.Stat(shotJS); err != nil {
+		err = ioutil.WriteFile(shotJS, []byte(screenshotCoverJS), os.ModePerm)
+	}
+	if err != nil {
+		return
+	}
+
+	//使用chromium-browser
+	//	chromium-browser --headless --disable-gpu --screenshot --no-sandbox --window-size=320,480 http://www.bookstack.cn
+	link := "http://localhost:" + beego.AppConfig.DefaultString("httpport", "8181") + "/local-render-cover?id=" + identify
+	name := "node"
+	if ok := beego.AppConfig.DefaultBool("puppeteer", false); ok {
+		args = []string{shotJS, "--identify", identify, "--url", link}
+	} else {
+		err = errors.New("请安装并启用puppeteer")
+		return
+	}
+	cmd := exec.Command(name, args...)
+	beego.Info("render cover by book id:", cmd.Args)
+	// 超过30秒，杀掉进程，避免长期占用
+	time.AfterFunc(httpTimeout, func() {
+		if cmd.Process != nil && cmd.Process.Pid != 0 {
+			cmd.Process.Kill()
+		}
+	})
+	if err = cmd.Run(); err != nil {
+		beego.Error(err)
+	}
+	return
 }
 
 //使用chrome采集网页HTML
@@ -192,12 +253,12 @@ func CrawlByChrome(urlStr string, bookIdentify string) (cont string, err error) 
 		args = []string{"--headless", "--disable-gpu", "--dump-dom", "--no-sandbox", urlStr}
 	}
 	cmd := exec.Command(name, args...)
-	expire := 180
+	expire := 2 * httpTimeout
 	if isScreenshot {
-		expire = 300
+		expire = 10 * httpTimeout
 	}
-	time.AfterFunc(time.Duration(expire)*time.Second, func() {
-		if cmd.Process.Pid != 0 {
+	time.AfterFunc(expire, func() {
+		if cmd.Process != nil && cmd.Process.Pid != 0 {
 			cmd.Process.Kill()
 		}
 	})
@@ -296,8 +357,14 @@ func CropImage(file string, width, height int) (err error) {
 //force:是否是强力采集
 //intelligence:是否是智能提取，智能提取，使用html2article，否则提取body
 //diySelecter:自定义选择器
-//注意：由于参数问题，采集并下载图片的话，在headers中加上key为"project"的字段，值为文档项目的标识
+//注意：由于参数问题，采集并下载图片的话，在headers中加上key为"project"的字段，值为书籍的标识
 func CrawlHtml2Markdown(urlstr string, contType int, force bool, intelligence int, diySelector string, excludeSelector []string, links map[string]string, headers ...map[string]string) (cont string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = errors.New(fmt.Sprint(r))
+			return
+		}
+	}()
 
 	//记录已经存在了的图片，避免重复图片出现重复采集的情况
 	var existImage bool
@@ -322,9 +389,12 @@ func CrawlHtml2Markdown(urlstr string, contType int, force bool, intelligence in
 	if force { //强力模式
 		cont, err = CrawlByChrome(urlstr, project)
 	} else {
-		req := util.BuildRequest("get", urlstr, "", "", "", true, false, headers...)
-		req.SetTimeout(30*time.Second, 30*time.Second)
+		req := util.BuildRequest("get", urlstr, "", "", "", true, false, headers...).SetTimeout(httpTimeout, httpTimeout)
 		cont, err = req.String()
+		if err != nil && transfer != "" {
+			req := util.BuildRequest("get", transfer+urlstr, urlstr, "", "", true, false, headers...).SetTimeout(httpTimeout, httpTimeout)
+			cont, err = req.String()
+		}
 	}
 
 	cont = strings.Replace(cont, "¶", "", -1)
@@ -500,6 +570,7 @@ func HandleSVG(doc *goquery.Document, project string) *goquery.Document {
 //操作图片显示
 //如果用的是oss存储，这style是avatar、cover可选项
 func ShowImg(img string, style ...string) (url string) {
+	img = strings.ReplaceAll(img, "\\", "/")
 	if strings.HasPrefix(img, "https://") || strings.HasPrefix(img, "http://") {
 		return img
 	}
@@ -674,11 +745,6 @@ func GitClone(url, folder string) error {
 	return exec.Command("git", args...).Run()
 }
 
-type SplitMD struct {
-	Identify string
-	Cont     string
-}
-
 // 处理http响应成败
 func HandleResponse(resp *http.Response, err error) error {
 	if err == nil {
@@ -696,6 +762,7 @@ func DownImage(src string, headers ...map[string]string) (filename string, err e
 	var resp *http.Response
 	var b []byte
 	ext := ".png"
+	src = strings.Replace(src, "/./", "/", -1)
 	file := cryptil.Md5Crypt(src)
 	filename = "cache/" + file
 	srcLower := strings.ToLower(src)
@@ -719,12 +786,18 @@ func DownImage(src string, headers ...map[string]string) (filename string, err e
 		}
 		return
 	}
-
 	//url链接图片
 	resp, err = util.BuildRequest("get", src, src, "", "", true, false, headers...).Response()
 	if err != nil {
-		return
+		if transfer == "" {
+			return
+		}
+		resp, err = util.BuildRequest("get", transfer+src, src, "", "", true, false, headers...).Response()
+		if err != nil {
+			return
+		}
 	}
+
 	defer resp.Body.Close()
 	if tmp := strings.TrimPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "image/"); tmp != "" {
 		if strings.HasPrefix(strings.ToLower(tmp), "svg") {
@@ -743,13 +816,17 @@ func DownImage(src string, headers ...map[string]string) (filename string, err e
 	return
 }
 
-// 截取md5前8个字符
+// 截取md5前16个字符
 func MD5Sub16(str string) string {
-	return cryptil.Md5Crypt(str)[0:16]
+	return cryptil.Md5Crypt(strings.ToLower(str))[0:16]
 }
 
 func JoinURL(rawURL string, urlPath string) string {
 	rawURL = strings.TrimSpace(rawURL)
+
+	if strings.HasPrefix(urlPath, "#") {
+		return urlPath
+	}
 
 	lowerURLPath := strings.ToLower(urlPath)
 	if strings.HasPrefix(lowerURLPath, "//") {
@@ -873,5 +950,127 @@ func GetIP(ctx *context.Context, field string) (ip string) {
 	if len(slice) == 2 && !strings.Contains(ctx.Request.RemoteAddr, ",") {
 		return slice[0]
 	}
+	return
+}
+
+func IsMobile(userAgent string) bool {
+	return user_agent.New(userAgent).Mobile()
+}
+
+func FormatReadingTime(seconds int, withoutTag ...bool) string {
+	strFmt := "<span>%v</span> <small>小时</small> <span>%v</span> <small>分钟</small>"
+	if len(withoutTag) > 0 && withoutTag[0] {
+		strFmt = "%v 小时 %v 分钟"
+	}
+	hour := int(seconds / 3600)
+	second := int(seconds % 3600 / 60)
+	secondStr := strconv.Itoa(second)
+	if second < 10 {
+		secondStr = "0" + secondStr
+	}
+	return fmt.Sprintf(strFmt, hour, secondStr)
+}
+
+// 拆分markdown
+func SplitMarkdown(segSharp, markdown string) (markdowns []string) {
+	var (
+		segIdx       []int
+		sharp        = "#"
+		sharpReplace = []string{
+			"#######",
+			"######",
+			"#####",
+			"####",
+			"###",
+			"##",
+			"#",
+		}
+		indexCodeBlockStart = -1
+		indexCodeBlockEnd   = -1
+	)
+
+	replaceFmt := "\n${%v}$"
+	for _, item := range sharpReplace {
+		k := "\n" + item
+		markdown = strings.Replace(markdown, k, fmt.Sprintf(replaceFmt, strings.Count(item, sharp)), -1)
+	}
+
+	seg := fmt.Sprintf("${%v}$", strings.Count(segSharp, sharp))
+	slice := strings.Split(markdown, "\n")
+
+	for idx, item := range slice {
+		item = strings.TrimSpace(item)
+		if strings.Contains(item, "<pre") {
+			indexCodeBlockStart = idx
+		}
+
+		if strings.Contains(item, "/pre>") {
+			indexCodeBlockEnd = idx
+		}
+
+		if strings.Contains(item, "```") {
+			if indexCodeBlockEnd >= indexCodeBlockStart {
+				indexCodeBlockStart = idx
+			} else {
+				indexCodeBlockEnd = idx
+			}
+		}
+
+		if idx > indexCodeBlockEnd && indexCodeBlockEnd >= indexCodeBlockStart && strings.HasPrefix(item, seg) {
+			item = strings.Replace(item, seg, segSharp, -1)
+			slice[idx] = item
+			segIdx = append(segIdx, idx)
+		}
+	}
+
+	recoverSharp := func(md string) string {
+		for _, item := range sharpReplace {
+			md = strings.Replace(md, fmt.Sprintf("${%v}$", strings.Count(item, sharp)), item, -1)
+		}
+		return md
+	}
+
+	start := 0
+	for idx, line := range segIdx {
+		md := recoverSharp(strings.Join(slice[start:line], "\n"))
+		start = line
+		markdowns = append(markdowns, md)
+		if idx+1 == len(segIdx) {
+			markdowns = append(markdowns, recoverSharp(strings.Join(slice[line:], "\n")))
+		}
+	}
+
+	// 如果没有拆分到文档，则直接返回传过来的文档
+	if len(markdowns) == 0 {
+		markdowns = []string{markdown}
+	}
+	return
+}
+
+// ExecCommand 执行cmd命令操作
+func ExecCommand(name string, args []string, timeout ...time.Duration) (out string, err error) {
+	var (
+		stderr, stdout bytes.Buffer
+		expire         = 30 * time.Minute
+	)
+
+	if len(timeout) > 0 {
+		expire = timeout[0]
+	}
+
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	time.AfterFunc(expire, func() {
+		if cmd.Process != nil && cmd.Process.Pid != 0 {
+			out = out + fmt.Sprintf("\nexecute timeout: %v seconds.", expire.Seconds())
+			cmd.Process.Kill()
+		}
+	})
+	err = cmd.Run()
+	if err != nil {
+		err = fmt.Errorf("%v\n%v", err.Error(), stderr.String())
+	}
+	out = stdout.String()
 	return
 }

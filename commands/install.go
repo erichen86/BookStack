@@ -3,9 +3,8 @@ package commands
 import (
 	"fmt"
 	"os"
-	"time"
-
 	"strings"
+	"time"
 
 	"github.com/TruthHun/BookStack/conf"
 	"github.com/TruthHun/BookStack/models"
@@ -40,9 +39,8 @@ func Version() {
 
 //初始化数据
 func initialization() {
-
+	models.InstallAdsPosition()
 	err := models.NewOption().Init()
-
 	if err != nil {
 		panic(err.Error())
 		os.Exit(1)
@@ -50,7 +48,6 @@ func initialization() {
 
 	member, err := models.NewMember().FindByFieldFirst("account", "admin")
 	if err == orm.ErrNoRows {
-
 		member.Account = "admin"
 		member.Avatar = beego.AppConfig.String("avatar")
 		member.Password = "admin888"
@@ -60,15 +57,14 @@ func initialization() {
 		member.Email = "bookstack@qq.cn"
 
 		if err := member.Add(); err != nil {
-			panic("Member.Add => " + err.Error())
-			os.Exit(0)
+			beego.Error("Member.Add => " + err.Error())
 		}
 
 		book := models.NewBook()
 		book.MemberId = member.MemberId
 		book.BookName = "BookStack"
 		book.Status = 0
-		book.Description = "这是一个BookStack演示项目，该项目是由系统初始化时自动创建。"
+		book.Description = "这是一个BookStack演示书籍，该书籍是由系统初始化时自动创建。"
 		book.CommentCount = 0
 		book.PrivatelyOwned = 0
 		book.CommentStatus = "closed"
@@ -88,10 +84,8 @@ func initialization() {
 		book.Score = 40
 
 		if err := book.Insert(); err != nil {
-			panic("Book.Insert => " + err.Error())
-			os.Exit(0)
+			beego.Error("Book.Insert => " + err.Error())
 		}
-
 	}
 }
 
@@ -105,15 +99,15 @@ func initSeo() {
 		"('6','search_result','搜索结果页','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('7','user_basic','用户基本信息设置页','{title}  - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('8','user_pwd','用户修改密码页','{title}  - 书栈网(BookStack.CN)','{keywords}','{description}'),",
-		"('9','project_list','项目列表页','{title}  - 书栈网(BookStack.CN)','{keywords}','{description}'),",
+		"('9','project_list','书籍列表页','{title}  - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('11','login','登录页','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('12','reg','注册页','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('13','findpwd','找回密码','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('14','manage_dashboard','仪表盘','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('15','manage_users','用户管理','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('16','manage_users_edit','用户编辑','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
-		"('17','manage_project_list','项目列表','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
-		"('18','manage_project_edit','项目编辑','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
+		"('17','manage_project_list','书籍列表','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
+		"('18','manage_project_edit','书籍编辑','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('19','cate','首页','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('20','ucenter-share','用户主页','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",
 		"('21','ucenter-collection','用户收藏','{title} - 书栈网(BookStack.CN)','{keywords}','{description}'),",

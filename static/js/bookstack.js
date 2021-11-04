@@ -55,6 +55,17 @@ function load_doc(url,wd,without_history) {
             active_readed_menu(url);
             NProgress.done();
             pre_and_next_link();
+            //重新生成脑图
+ 	      $('.mindmap svg').detach();
+			try {
+			$('.mindmap').each(function() {
+				drawMindMap(this);
+			});				
+
+			} catch (e) {
+				console.log(e);
+
+			}           
             if(wd) {
                 var wds = wd.split(","),l=wds.length;
                 for (var i = 0; i < l; i++) {
@@ -66,6 +77,7 @@ function load_doc(url,wd,without_history) {
             $("#qrcode").qrcode(location.href);
             $(".read-count").text(res.data.view);
             $(".updated-at").text(res.data.updated_at);
+            initLinkWithImage()
         }else{
             // location.href=$url;
             //可能是存在缓存导致的加载失败，如果加载失败，直接刷新需要打开的链接【注意layer.js的引入】
@@ -83,6 +95,12 @@ function initHighlighting() {
     hljs.initLineNumbersOnLoad();
 }
 
+function initLinkWithImage(){
+    $(".markdown-body a img").each(function(){
+        $(this).after("<span class='btn btn-default btn-ilink btn-xs'><i class='fa fa-link'></i> 访问链接</span>")
+    })
+}
+
 var events = $("body");
 
 function change_url_state(url,title){
@@ -96,6 +114,7 @@ function active_readed_menu(url){
         href=$(this).attr("href");
         if (href==url) {
             $(this).addClass("jstree-clicked");
+            $(this).parents().removeClass("collapse-hide")
             $(this).parent().addClass("readed");
         }else{
             $(this).removeClass("jstree-clicked");
@@ -128,10 +147,59 @@ function pre_and_next_link(){
     }
 }
 
+function disableRightClick(){
+    $('body').on('contextmenu','audio,video', function(e) {
+        e.preventDefault();
+    });
+}
+
 $(function () {
+    disableRightClick();
+    $(".article-menu-detail>ul>li a").tooltip({placement: 'bottom'})
     $(".view-backtop").on("click", function () {
         $('.manual-right').animate({ scrollTop: '0px' }, 200);
     });
+    
+    $(".markdown-body").on("click", "img",function () {
+        var src = $(this).attr("src")
+        var nHeight = $(this)[0].naturalHeight
+        var nWidth = $(this)[0].naturalWidth
+        var winHeight = $(window).height()
+        var winWidth = $(window).width()
+        var displayWidth = nWidth
+        var displayHeight = nHeight
+        if(src.toLowerCase().endsWith(".svg")){
+            displayWidth = $(this)[0].clientWidth
+            displayHeight = $(this)[0].clientHeight
+        }
+        if (displayWidth>=winWidth*0.95){
+            displayWidth = winWidth*0.95
+            displayHeight=nHeight*(displayWidth/nWidth)
+        }
+        console.log(nWidth, nHeight, displayWidth,displayHeight,winWidth,winHeight)
+        var style="margin-top: 30px;"
+        var bv = $(".bookstack-viewer")
+        var img = bv.find("img")
+        if(winHeight>displayHeight){
+            var mt = (winHeight - displayHeight - 30 )/2
+            if (mt<=30) mt=30
+            style="margin-top: " + mt +"px"
+        }
+        console.log('winheight',winWidth,'displayHeight',displayHeight)
+        if(img.length>0){
+            img.attr("src", src)
+            img.attr("style", style)
+        }else {
+            bv.append('<img style="'+style+'" src="'+src+'"/>')
+        }
+        bv.fadeIn();
+        $(".bookstack-viewer").scrollTop(0)
+    });
+
+    $(".bookstack-viewer").click(function () {
+        $(this).fadeOut()
+    });
+
     $(".manual-right").scroll(function () {
         var top = $(".manual-right").scrollTop();
         if(top > 100){
@@ -148,9 +216,6 @@ $(function () {
                 find=true;
             }
         }
-
-
-
     });
 
     $(".manual-left").on("click","a",function () {
@@ -286,6 +351,7 @@ $(function () {
     pre_and_next_link();
     $(".article-menu-detail a").click(function (e) {
         e.preventDefault();
+        $(".tooltip").remove();
         load_doc($(this).attr("href"),"");
     });
     $(".hung-read-link").on("click","a",function (e) {
@@ -407,7 +473,6 @@ $(function () {
                 break;
             case 39:
                 var href=$(".hung-next a").attr("href");
-                console.log("right",href);
                 if(!$(".hung-next").hasClass("hidden") && href!="#"){
                     load_doc(href,"");
                 }
@@ -416,10 +481,14 @@ $(function () {
     });
 
     $('.article-menu').animate({scrollTop:$('.article-menu a.jstree-clicked').offset().top-180}, 300);
-
     window.onpopstate=function(e){
         if (location.href.indexOf("#")<0) {
             load_doc(location.pathname,"",true);
         }
     }
+
+    $("body").on("change", ".video-playbackrate select", function(e){
+        var _this =$(this),val = _this.val(),video = _this.parents(".video-main").find("video");
+        if (video.length>0) video[0].playbackRate = val
+    })
 });

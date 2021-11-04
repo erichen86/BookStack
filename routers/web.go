@@ -7,6 +7,7 @@ import (
 
 func webRouter() {
 	beego.Router("/", &controllers.CateController{}, "get:Index")
+	beego.Router("/app", &controllers.StaticController{}, "get:APP")
 	beego.Router("/cate", &controllers.CateController{}, "get:List")
 	//beego.Router("/", &controllers.HomeController{}, "*:Index")
 	beego.Router("/explore", &controllers.HomeController{}, "*:Index")
@@ -29,6 +30,7 @@ func webRouter() {
 	beego.Router("/manager/member/create", &controllers.ManagerController{}, "post:CreateMember")
 	beego.Router("/manager/member/delete", &controllers.ManagerController{}, "post:DeleteMember")
 	beego.Router("/manager/member/update-member-status", &controllers.ManagerController{}, "post:UpdateMemberStatus")
+	beego.Router("/manager/member/update-member-no-rank", &controllers.ManagerController{}, "post:UpdateMemberNoRank")
 	beego.Router("/manager/member/change-member-role", &controllers.ManagerController{}, "post:ChangeMemberRole")
 	beego.Router("/manager/books", &controllers.ManagerController{}, "*:Books")
 	beego.Router("/manager/books/edit/:key", &controllers.ManagerController{}, "*:EditBook")
@@ -44,8 +46,11 @@ func webRouter() {
 	beego.Router("/manager/books/open", &controllers.ManagerController{}, "post:PrivatelyOwned")
 	beego.Router("/manager/attach/list", &controllers.ManagerController{}, "*:AttachList")
 	beego.Router("/manager/attach/detailed/:id", &controllers.ManagerController{}, "*:AttachDetailed")
-	beego.Router("/manager/attach/delete", &controllers.ManagerController{}, "post:AttachDelete")
+	beego.Router("/manager/attach/delete", &controllers.ManagerController{}, "*:AttachDelete")
 	beego.Router("/manager/seo", &controllers.ManagerController{}, "post,get:Seo")
+	beego.Router("/manager/ads", &controllers.ManagerController{}, "post,get:Ads")
+	beego.Router("/manager/update-ads", &controllers.ManagerController{}, "post,get:UpdateAds")
+	beego.Router("/manager/del-ads", &controllers.ManagerController{}, "get:DelAds")
 	beego.Router("/manager/category", &controllers.ManagerController{}, "post,get:Category")
 	beego.Router("/manager/update-cate", &controllers.ManagerController{}, "get:UpdateCate")
 	beego.Router("/manager/del-cate", &controllers.ManagerController{}, "get:DelCate")
@@ -63,6 +68,9 @@ func webRouter() {
 	beego.Router("/manager/submit-book", &controllers.ManagerController{}, "get:SubmitBook")
 	beego.Router("/manager/submit-book/update", &controllers.ManagerController{}, "get:UpdateSubmitBook")
 	beego.Router("/manager/submit-book/delete", &controllers.ManagerController{}, "get:DeleteSubmitBook")
+	beego.Router("/manager/tags", &controllers.ManagerController{}, "get:Tags")
+	beego.Router("/manager/add-tags", &controllers.ManagerController{}, "post:AddTags")
+	beego.Router("/manager/del-tags", &controllers.ManagerController{}, "get:DelTags")
 
 	beego.Router("/setting", &controllers.SettingController{}, "*:Index")
 	beego.Router("/setting/password", &controllers.SettingController{}, "*:Password")
@@ -140,13 +148,19 @@ func webRouter() {
 	beego.Router("/user/:username/follow", &controllers.UserController{}, "get:Follow")
 	beego.Router("/user/:username/fans", &controllers.UserController{}, "get:Fans")
 	beego.Router("/follow/:uid", &controllers.BaseController{}, "get:SetFollow") //关注或取消关注
+	beego.Router("/user/sign", &controllers.BaseController{}, "get:SignToday")   //关注或取消关注
 	//用户中心 【end】
 
 	beego.Router("/tag/:key", &controllers.LabelController{}, "get:Index")
 	beego.Router("/tag", &controllers.LabelController{}, "get:List")
 	beego.Router("/tags", &controllers.LabelController{}, "get:List")
+
+	beego.Router("/rank", &controllers.RankController{}, "get:Index")
+
 	beego.Router("/sitemap.html", &controllers.BaseController{}, "get:Sitemap")
 	beego.Router("/local-render", &controllers.LocalhostController{}, "get,post:RenderMarkdown")
+	beego.Router("/local-render-cover", &controllers.LocalhostController{}, "get:RenderCover")
 	beego.Router("/projects/*", &controllers.StaticController{}, "get:ProjectsFile")
+	beego.Router("/uploads/*", &controllers.StaticController{}, "get:Uploads")
 	beego.Router("/*", &controllers.StaticController{}, "get:StaticFile")
 }

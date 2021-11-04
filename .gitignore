@@ -18,6 +18,8 @@ _cgo_gotypes.go
 _cgo_export.*
 
 _testmain.go
+*.json
+test/
 
 *.exe
 *.test
@@ -43,3 +45,7 @@ node_modules
 dist
 output
 virtualroot
+docker
+license.cert
+index
+index/

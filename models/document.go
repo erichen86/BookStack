@@ -7,7 +7,6 @@ import (
 
 	"github.com/TruthHun/gotil/mdtil"
 
-	"bytes"
 	"fmt"
 
 	"io/ioutil"
@@ -41,11 +40,11 @@ type Document struct {
 	Release      string        `orm:"column(release);type(text);null" json:"release"` // Release 发布后的Html格式内容.
 	CreateTime   time.Time     `orm:"column(create_time);type(datetime);auto_now_add" json:"create_time"`
 	MemberId     int           `orm:"column(member_id);type(int)" json:"member_id"`
-	ModifyTime   time.Time     `orm:"column(modify_time);type(datetime);default(null);auto_now" json:"modify_time"`
+	ModifyTime   time.Time     `orm:"column(modify_time);type(datetime);default(null)" json:"modify_time"`
 	ModifyAt     int           `orm:"column(modify_at);type(int)" json:"-"`
 	Version      int64         `orm:"type(bigint);column(version)" json:"version"`
 	AttachList   []*Attachment `orm:"-" json:"attach"`
-	Vcnt         int           `orm:"column(vcnt);default(0)" json:"vcnt"` //文档项目被浏览次数
+	Vcnt         int           `orm:"column(vcnt);default(0)" json:"vcnt"` //书籍被浏览次数
 	Markdown     string        `orm:"-" json:"markdown"`
 }
 
@@ -97,7 +96,7 @@ func (m *Document) Find(id int) (doc *Document, err error) {
 func (m *Document) InsertOrUpdate(cols ...string) (id int64, err error) {
 	o := orm.NewOrm()
 	id = int64(m.DocumentId)
-	m.ModifyTime = time.Now()
+
 	m.DocumentName = strings.TrimSpace(m.DocumentName)
 	if m.DocumentId > 0 { //文档id存在，则更新
 		_, err = o.Update(m, cols...)
@@ -109,6 +108,7 @@ func (m *Document) InsertOrUpdate(cols ...string) (id int64, err error) {
 	o.QueryTable("md_documents").Filter("identify", m.Identify).Filter("book_id", m.BookId).One(&mm, "document_id")
 	if mm.DocumentId == 0 {
 		m.CreateTime = time.Now()
+		m.ModifyTime = m.CreateTime
 		id, err = o.Insert(m)
 		NewBook().ResetDocumentNumber(m.BookId)
 	} else { //identify存在，则执行更新
@@ -127,7 +127,11 @@ func (m *Document) FindByFieldFirst(field string, v interface{}) (*Document, err
 
 //根据指定字段查询一条文档.
 func (m *Document) FindByBookIdAndDocIdentify(BookId, Identify interface{}) (*Document, error) {
-	err := orm.NewOrm().QueryTable(m.TableNameWithPrefix()).Filter("BookId", BookId).Filter("Identify", Identify).One(m)
+	q := orm.NewOrm().QueryTable(m.TableNameWithPrefix()).Filter("BookId", BookId)
+	err := q.Filter("Identify", Identify).One(m)
+	if m.DocumentId == 0 && !strings.HasSuffix(fmt.Sprint(Identify), ".md") {
+		err = q.Filter("identify", fmt.Sprint(Identify)+".md").One(m)
+	}
 	return m, err
 }
 
@@ -179,37 +183,50 @@ func (m *Document) ReleaseContent(bookId int, baseUrl string) {
 	qs.One(&book)
 
 	//全部重新发布。查询该书籍的所有文档id
-	_, err := o.QueryTable(m.TableNameWithPrefix()).Filter("book_id", bookId).Limit(20000).All(&docs, "document_id")
+	_, err := o.QueryTable(m.TableNameWithPrefix()).Filter("book_id", bookId).Limit(20000).All(&docs, "document_id", "identify", "modify_time")
 	if err != nil {
 		beego.Error("发布失败 => ", err)
 		return
 	}
+	docMap := make(map[string]bool)
+	for _, item := range docs {
+		docMap[item.Identify] = true
+	}
 
 	ModelStore := new(DocumentStore)
 	for _, item := range docs {
-		content := strings.TrimSpace(ModelStore.GetFiledById(item.DocumentId, "content"))
-		if len(utils.GetTextFromHtml(content)) == 0 {
-			//内容为空，渲染一下文档，然后再重新获取
-			utils.RenderDocumentById(item.DocumentId)
-			content = strings.TrimSpace(ModelStore.GetFiledById(item.DocumentId, "content"))
-		}
-		item.Release = content
-		attachList, err := NewAttachment().FindListByDocumentId(item.DocumentId)
-		if err == nil && len(attachList) > 0 {
-			content := bytes.NewBufferString("<div class=\"attach-list\"><strong>附件</strong><ul>")
-			for _, attach := range attachList {
-				li := fmt.Sprintf("<li><a href=\"%s\" target=\"_blank\" title=\"%s\">%s</a></li>", attach.HttpPath, attach.FileName, attach.FileName)
-				content.WriteString(li)
-			}
-			content.WriteString("</ul></div>")
-			item.Release += content.String()
+		ds, err := ModelStore.GetById(item.DocumentId)
+		if err != nil {
+			beego.Error(err)
+			continue
 		}
 
-		// crawl image
+		if strings.TrimSpace(utils.GetTextFromHtml(strings.Replace(ds.Markdown, "[TOC]", "", -1))) == "" {
+			// 如果markdown内容为空，则查询下一级目录内容来填充
+			ds.Markdown, ds.Content = item.BookStackAuto(bookId, ds.DocumentId)
+			ds.Markdown = "[TOC]\n\n" + ds.Markdown
+		} else if len(utils.GetTextFromHtml(ds.Content)) == 0 {
+			//内容为空，渲染一下文档，然后再重新获取
+			utils.RenderDocumentById(item.DocumentId)
+			ds, _ = ModelStore.GetById(item.DocumentId)
+		}
+
+		item.Release = ds.Content
+		// attachList, err := NewAttachment().FindListByDocumentId(item.DocumentId)
+		// if err == nil && len(attachList) > 0 {
+		// 	content := bytes.NewBufferString("<div class=\"attach-list\"><strong>附件</strong><ul>")
+		// 	for _, attach := range attachList {
+		// 		li := fmt.Sprintf("<li><a href=\"%s\" target=\"_blank\" title=\"%s\">%s</a></li>", attach.HttpPath, attach.FileName, attach.FileName)
+		// 		content.WriteString(li)
+		// 	}
+		// 	content.WriteString("</ul></div>")
+		// 	item.Release += content.String()
+		// }
+
+		// 采集图片与稳定内容连接替换
 		if gq, err := goquery.NewDocumentFromReader(strings.NewReader(item.Release)); err == nil {
 			images := gq.Find("img")
 			if images.Length() > 0 {
-				md := ModelStore.GetFiledById(item.DocumentId, "markdown")
 				images.Each(func(i int, selection *goquery.Selection) {
 					if src, ok := selection.Attr("src"); ok {
 						lowerSrc := strings.ToLower(src)
@@ -231,20 +248,56 @@ func (m *Document) ReleaseContent(bookId int, baseUrl string) {
 									beego.Error(err.Error())
 								}
 								selection.SetAttr("src", newSrc)
-								md = strings.Replace(md, src, newSrc, -1)
-
+								ds.Markdown = strings.Replace(ds.Markdown, src, newSrc, -1)
 							} else {
 								beego.Error(err.Error())
 							}
 						}
 					}
 				})
-				ModelStore.InsertOrUpdate(DocumentStore{DocumentId: item.DocumentId, Markdown: md}, "markdown")
+			}
+
+			links := gq.Find("a")
+			if links.Length() > 0 {
+				links.Each(func(i int, selection *goquery.Selection) {
+					if href, ok := selection.Attr("href"); ok {
+						lowerHref := strings.ToLower(href)
+						if strings.HasPrefix(lowerHref, "https://") || strings.HasPrefix(lowerHref, "http://") {
+							// 需要区别处理存在#号的链接与不存在#号的链接，并不是存在#号的链接都是锚点，如vue开发的hash模式的url
+							identify := utils.MD5Sub16(strings.Trim(href, "/")) + ".md"
+							if _, ok := docMap[identify]; ok {
+								// 替换markdown中的连接，markdown的链接形式：  [链接名称](xxURL)
+								ds.Markdown = strings.Replace(ds.Markdown, "("+href+")", "($"+identify+")", -1)
+								// 直接identify就好了，比如在 /read/BookIdentify/DocIdentify.md 文档下，xx_identify.md 浏览器会转为 /read/BookIdentify/xx_identify.md
+								selection.SetAttr("href", identify)
+							} else {
+								if strings.Contains(href, "#") {
+									slice := strings.Split(href, "#")
+									identify = utils.MD5Sub16(strings.Trim(slice[0], "/")) + ".md"
+									if _, ok := docMap[identify]; ok {
+										ds.Markdown = strings.Replace(ds.Markdown, "("+slice[0]+"#", "($"+identify+"#", -1)
+										selection.SetAttr("href", slice[0]+"#"+strings.Join(slice[1:], "#"))
+									}
+								}
+							}
+						}
+					}
+				})
 			}
 			item.Release, _ = gq.Find("body").Html()
 		}
+		ds.Content = item.Release
+		fields := []string{"markdown", "content"}
+		if ds.UpdatedAt.Unix() < 0 {
+			ds.UpdatedAt = time.Now()
+			fields = append(fields, "updated_at")
+		} else { // 不修改更新时间
+			fields = append(fields, "-updated_at")
+		}
+		item.ModifyTime = ds.UpdatedAt
+		ModelStore.InsertOrUpdate(ds, fields...)
 
-		_, err = o.Update(item, "release")
+		_, err = o.Update(item, "release", "modify_time")
 		if err != nil {
 			beego.Error(fmt.Sprintf("发布失败 => %+v", item), err)
 		}
@@ -309,22 +362,42 @@ func (m *Document) GenerateBook(book *Book, baseUrl string) {
 		defer os.RemoveAll(folder)
 	}
 
-	//生成致谢信内容
-	if htmlStr, err := utils.ExecuteViewPathTemplate("document/tpl_statement.html", map[string]interface{}{"Model": book, "Nickname": Nickname, "Date": ExpCfg.Timestamp}); err == nil {
-		h1Title := "说明"
-		if doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlStr)); err == nil {
-			h1Title = doc.Find("h1").Text()
+	if beego.AppConfig.DefaultBool("exportCustomCover", false) {
+		// 生成书籍封面
+		if err = utils.RenderCoverByBookIdentify(book.Identify); err != nil {
+			beego.Error(err)
 		}
-		toc := converter.Toc{
-			Id:    time.Now().Nanosecond(),
-			Pid:   0,
-			Title: h1Title,
-			Link:  "statement.html",
+		cover := "cover.png"
+		if _, err = os.Stat(folder + cover); err != nil {
+			cover = ""
 		}
-		htmlname := folder + toc.Link
-		ioutil.WriteFile(htmlname, []byte(htmlStr), os.ModePerm)
-		ExpCfg.Toc = append(ExpCfg.Toc, toc)
+		// 用相对路径
+		ExpCfg.Cover = cover
 	}
+
+	//生成致谢内容
+	statementFile := "ebook/statement.html"
+	_, err = os.Stat("views/" + statementFile)
+	if err != nil {
+		beego.Error(err)
+	} else {
+		if htmlStr, err := utils.ExecuteViewPathTemplate(statementFile, map[string]interface{}{"Model": book, "Nickname": Nickname, "Date": ExpCfg.Timestamp}); err == nil {
+			h1Title := "说明"
+			if doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlStr)); err == nil {
+				h1Title = doc.Find("h1").Text()
+			}
+			toc := converter.Toc{
+				Id:    time.Now().Nanosecond(),
+				Pid:   0,
+				Title: h1Title,
+				Link:  "statement.html",
+			}
+			htmlname := folder + toc.Link
+			ioutil.WriteFile(htmlname, []byte(htmlStr), os.ModePerm)
+			ExpCfg.Toc = append(ExpCfg.Toc, toc)
+		}
+	}
+
 	ModelStore := new(DocumentStore)
 	for _, doc := range docs {
 		content := strings.TrimSpace(ModelStore.GetFiledById(doc.DocumentId, "content"))
@@ -381,7 +454,14 @@ func (m *Document) GenerateBook(book *Book, baseUrl string) {
 		}
 
 		//生成html
-		if htmlStr, err := utils.ExecuteViewPathTemplate("document/tpl_export.html", map[string]interface{}{"Model": book, "Doc": doc, "BaseUrl": baseUrl, "Nickname": Nickname, "Date": ExpCfg.Timestamp}); err == nil {
+		if htmlStr, err := utils.ExecuteViewPathTemplate("ebook/tpl_export.html", map[string]interface{}{
+			"Model":    book,
+			"Doc":      doc,
+			"BaseUrl":  baseUrl,
+			"Nickname": Nickname,
+			"Date":     ExpCfg.Timestamp,
+			"Now":      time.Now().Unix(),
+		}); err == nil {
 			htmlName := folder + toc.Link
 			ioutil.WriteFile(htmlName, []byte(htmlStr), os.ModePerm)
 		} else {
@@ -396,6 +476,7 @@ func (m *Document) GenerateBook(book *Book, baseUrl string) {
 	} else {
 		beego.Error("css样式不存在", err)
 	}
+
 	cfgFile := folder + "config.json"
 	ioutil.WriteFile(cfgFile, []byte(util.InterfaceToJson(ExpCfg)), os.ModePerm)
 	if Convert, err := converter.NewConverter(cfgFile, debug); err == nil {
@@ -415,23 +496,7 @@ func (m *Document) GenerateBook(book *Book, baseUrl string) {
 		beego.Error(err.Error())
 	}
 	orm.NewOrm().Read(book)
-	newBook := fmt.Sprintf("projects/%v/books/%v", book.Identify, book.GenerateTime.Unix())
-
-	exts := []string{".pdf", ".epub", ".mobi"}
-	for _, ext := range exts {
-		switch utils.StoreType {
-		case utils.StoreOss:
-			//不要开启gzip压缩，否则会出现文件损坏的情况
-			if err := store.ModelStoreOss.MoveToOss(folder+"output/book"+ext, newBook+ext, true, false); err != nil {
-				beego.Error(err)
-			} else { //设置下载头
-				store.ModelStoreOss.SetObjectMeta(newBook+ext, book.BookName+ext)
-			}
-		case utils.StoreLocal: //本地存储
-			store.ModelStoreLocal.MoveToStore(folder+"output/book"+ext, "uploads/"+newBook+ext)
-		}
-
-	}
+	newBookFmt := fmt.Sprintf("projects/%v/books/%v", book.Identify, book.GenerateTime.Unix())
 
 	//删除旧文件
 	switch utils.StoreType {
@@ -440,13 +505,30 @@ func (m *Document) GenerateBook(book *Book, baseUrl string) {
 			beego.Error(err)
 		}
 	case utils.StoreLocal: //本地存储
-		if err := store.ModelStoreLocal.DelFiles(oldBook+".pdf", oldBook+".epub", oldBook+".mobi"); err != nil { //删除旧版
-			beego.Error(err)
+		if utils.StoreType == utils.StoreLocal {
+			if err = os.RemoveAll(fmt.Sprintf("uploads/projects/%v/books/", book.Identify)); err != nil {
+				beego.Error(err)
+			}
+		}
+	}
+
+	exts := []string{".pdf", ".epub", ".mobi"}
+	for _, ext := range exts {
+		switch utils.StoreType {
+		case utils.StoreOss:
+			//不要开启gzip压缩，否则会出现文件损坏的情况
+			if err := store.ModelStoreOss.MoveToOss(folder+"output/book"+ext, newBookFmt+ext, true, false); err != nil {
+				beego.Error(err)
+			} else { //设置下载头
+				store.ModelStoreOss.SetObjectMeta(newBookFmt+ext, book.BookName+ext)
+			}
+		case utils.StoreLocal: //本地存储
+			store.ModelStoreLocal.MoveToStore(folder+"output/book"+ext, "uploads/"+newBookFmt+ext)
 		}
 	}
 }
 
-//根据项目ID查询文档列表(含文档内容).
+//根据书籍ID查询文档列表(含文档内容).
 func (m *Document) FindListByBookId(bookId int, withoutContent ...bool) (docs []*Document, err error) {
 	q := orm.NewOrm().QueryTable(m.TableNameWithPrefix()).Filter("book_id", bookId).OrderBy("order_sort")
 	if len(withoutContent) > 0 && withoutContent[0] {
@@ -459,7 +541,7 @@ func (m *Document) FindListByBookId(bookId int, withoutContent ...bool) (docs []
 	return
 }
 
-//根据项目ID查询文档一级目录.
+//根据书籍ID查询文档一级目录.
 func (m *Document) GetMenuTop(bookId int) (docs []*Document, err error) {
 	var docsAll []*Document
 	o := orm.NewOrm()
@@ -481,7 +563,7 @@ func (m *Document) GetParentTitle(pid int) (title string) {
 }
 
 //自动生成下一级的内容
-func (m *Document) BookStackAuto(bookId, docId int) (md, cont string) {
+func (m *Document) BookStackAuto(bookId, docId int, isSummary ...bool) (md, cont string) {
 	//自动生成文档内容
 	var docs []Document
 	orm.NewOrm().QueryTable("md_documents").Filter("book_id", bookId).Filter("parent_id", docId).OrderBy("order_sort").All(&docs, "document_id", "document_name", "identify")
@@ -489,7 +571,7 @@ func (m *Document) BookStackAuto(bookId, docId int) (md, cont string) {
 	var newMd []string   //新markdown内容
 	for _, doc := range docs {
 		newMd = append(newMd, fmt.Sprintf(`- [%v]($%v)`, doc.DocumentName, doc.Identify))
-		newCont = append(newCont, fmt.Sprintf(`<li><a href="$%v">%v</a></li>`, doc.Identify, doc.DocumentName))
+		newCont = append(newCont, fmt.Sprintf(`<li><a href="%v">%v</a></li>`, doc.Identify, doc.DocumentName))
 	}
 	md = strings.Join(newMd, "\n")
 	cont = "<ul>" + strings.Join(newCont, "") + "</ul>"
@@ -591,45 +673,39 @@ func (m *Document) BookStackCrawl(html, md string, bookId, uid int) (content, ma
 	return
 }
 
+func (m *Document) AutoTitle(identify interface{}, defaultTitle ...string) (title string) {
+	if len(defaultTitle) > 0 {
+		title = defaultTitle[0]
+	}
+	d := NewDocument()
+	sqlQuery := "select document_id from md_documents where identify = ? or document_id = ? limit 1"
+	orm.NewOrm().Raw(sqlQuery, identify, identify).QueryRow(&d)
+	if d.DocumentId > 0 {
+		tmpTitle := strings.TrimSpace(utils.ParseTitleFromMdHtml(mdtil.Md2html(NewDocumentStore().GetFiledById(d.DocumentId, "markdown"))))
+		if tmpTitle != "" {
+			title = tmpTitle
+		}
+	}
+	return
+}
+
 // markdown 文档拆分
 func (m *Document) SplitMarkdownAndStore(seg string, markdown string, docId int) (err error) {
-	var mapReplace = map[string]string{
-		"${7}$": "#######",
-		"${6}$": "######",
-		"${5}$": "#####",
-		"${4}$": "####",
-		"${3}$": "###",
-		"${2}$": "##",
-		"${1}$": "#",
-	}
-
 	m, err = m.Find(docId)
 	if err != nil {
 		return
 	}
+	identifyFmt := "spilt.%v." + m.Identify
 
-	newIdentifyFmt := "spilt.%v." + m.Identify
-
-	seg = fmt.Sprintf("${%v}$", strings.Count(seg, "#"))
-	for i := 7; i > 0; i-- {
-		slice := make([]string, i+1)
-		k := "\n" + strings.Join(slice, "#")
-		markdown = strings.Replace(markdown, k, fmt.Sprintf("\n${%v}$", i), -1)
-	}
-	contSlice := strings.Split(markdown, seg)
-
-	for idx, val := range contSlice {
-		var doc = NewDocument()
-
-		if idx != 0 {
-			val = seg + val
-		}
-		for k, v := range mapReplace {
-			val = strings.Replace(val, k, v, -1)
+	markdowns := utils.SplitMarkdown(seg, markdown)
+	for idx, md := range markdowns {
+		if !strings.Contains(md, "[TOC]") {
+			md = "[TOC]\n\n" + md
 		}
 
-		doc.Identify = fmt.Sprintf(newIdentifyFmt, idx)
-		if idx == 0 { //不需要使用newIdentify
+		doc := NewDocument()
+		doc.Identify = fmt.Sprintf(identifyFmt, idx)
+		if idx == 0 { //不需要使用新标识
 			doc = m
 		} else {
 			doc.OrderSort = idx
@@ -637,8 +713,8 @@ func (m *Document) SplitMarkdownAndStore(seg string, markdown string, docId int)
 		}
 		doc.Release = ""
 		doc.BookId = m.BookId
-		doc.Markdown = val
-		doc.DocumentName = utils.ParseTitleFromMdHtml(mdtil.Md2html(val))
+		doc.Markdown = md
+		doc.DocumentName = utils.ParseTitleFromMdHtml(mdtil.Md2html(md))
 		doc.Version = time.Now().Unix()
 		doc.MemberId = m.MemberId
 

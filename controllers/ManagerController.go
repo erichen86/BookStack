@@ -3,8 +3,12 @@ package controllers
 import (
 	"encoding/json"
 	"html/template"
+	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/aliyun/aliyun-oss-go-sdk/oss"
+	"github.com/araddon/dateparse"
 
 	"path/filepath"
 	"strconv"
@@ -15,7 +19,6 @@ import (
 
 	"os"
 
-	"github.com/TruthHun/BookStack/commands"
 	"github.com/TruthHun/BookStack/conf"
 	"github.com/TruthHun/BookStack/models"
 	"github.com/TruthHun/BookStack/models/store"
@@ -36,6 +39,15 @@ func (this *ManagerController) Prepare() {
 	}
 }
 
+var installed []installedDependency
+
+type installedDependency struct {
+	Name        string // 依赖名称
+	IsInstalled bool   // 是否已安装
+	Message     string // 相关信息
+	Error       string
+}
+
 func (this *ManagerController) Index() {
 	this.TplName = "manager/index.html"
 	this.Data["Model"] = models.NewDashboard().Query()
@@ -44,7 +56,87 @@ func (this *ManagerController) Index() {
 		"keywords":    "仪表盘",
 		"description": this.Sitename + "专注于文档在线写作、协作、分享、阅读与托管，让每个人更方便地发布、分享和获得知识。",
 	})
+	if len(installed) == 0 {
+		var err error
+
+		errCalibre := "-"
+		if err = utils.IsInstalledCalibre("ebook-convert"); err != nil {
+			errCalibre = err.Error()
+		}
+		installed = append(installed, installedDependency{
+			Name:        "calibre",
+			IsInstalled: err == nil,
+			Error:       errCalibre,
+			Message:     "calibre 用于将书籍转换成PDF、epub和mobi ==> <a class='text-danger' target='_blank' href='https://www.bookstack.cn/read/help/Ubuntu.md'>安装教程</a>",
+		})
+
+		errGit := "-"
+		if err = utils.IsInstalledGit(); err != nil {
+			errGit = err.Error()
+		}
+		installed = append(installed, installedDependency{
+			Name:        "git",
+			IsInstalled: err == nil,
+			Error:       errGit,
+			Message:     "git，用于克隆项目",
+		})
+
+		errChrome := "-"
+		if err = utils.IsInstalledChrome(beego.AppConfig.DefaultString("chrome", "chrome")); err != nil {
+			errChrome = err.Error()
+		}
+		installed = append(installed, installedDependency{
+			Name:        "chrome",
+			IsInstalled: err == nil,
+			Error:       errChrome,
+			Message:     "chrome浏览器，即谷歌浏览器，或者chromium-browser，用于渲染markdown内容为HTML。",
+		})
+
+		errPuppeteer := "-"
+		if err = utils.IsInstalledPuppetter(beego.AppConfig.DefaultInt("httpport", 8181)); err != nil {
+			errPuppeteer = err.Error()
+		}
+		installed = append(installed, installedDependency{
+			Name:        "puppeteer",
+			IsInstalled: err == nil,
+			Error:       errPuppeteer,
+			Message:     "puppeteer, node.js的模块，用于将markdown渲染为HTML以及生成电子书封面。 <a class='text-danger' target='_blank' href='https://www.bookstack.cn/read/help/Ubuntu.md'>安装教程</a>",
+		})
+	}
+
+	this.Data["Installed"] = installed
 	this.Data["IsDashboard"] = true
+}
+
+func (this *ManagerController) UpdateMemberNoRank() {
+	memberId, _ := this.GetInt("member_id", 0)
+	noRankInt, _ := this.GetInt("no_rank", 0)
+
+	if memberId <= 0 {
+		this.JsonResult(6001, "参数错误")
+	}
+	noRank := false
+	if noRankInt == 1 {
+		noRank = true
+	}
+	member := models.NewMember()
+
+	if _, err := member.Find(memberId); err != nil {
+		this.JsonResult(6002, "用户不存在")
+	}
+	if member.MemberId == this.Member.MemberId {
+		this.JsonResult(6004, "不能变更自己的状态")
+	}
+	if member.Role == conf.MemberSuperRole {
+		this.JsonResult(6005, "不能变更超级管理员的状态")
+	}
+	member.NoRank = noRank
+
+	if err := member.Update(); err != nil {
+		logs.Error("", err)
+		this.JsonResult(6003, "用户状态设置失败")
+	}
+	this.JsonResult(0, "ok", member)
 }
 
 // 用户列表.
@@ -85,6 +177,45 @@ func (this *ManagerController) Users() {
 	}
 	this.Data["Role"] = role
 	this.Data["Wd"] = wd
+}
+
+// 标签管理.
+func (this *ManagerController) Tags() {
+	this.TplName = "manager/tags.html"
+	this.Data["IsTag"] = true
+	size := 150
+	wd := this.GetString("wd")
+	pageIndex, _ := this.GetInt("page", 1)
+	tags, totalCount, err := models.NewLabel().FindToPager(pageIndex, size, wd)
+	if err != nil {
+		this.Data["ErrorMessage"] = err.Error()
+		return
+	}
+	if totalCount > 0 {
+		this.Data["PageHtml"] = utils.NewPaginations(conf.RollPage, int(totalCount), size, pageIndex, beego.URLFor("ManagerController.Tags"), "")
+	} else {
+		this.Data["PageHtml"] = ""
+	}
+	this.Data["Total"] = totalCount
+	this.Data["Tags"] = tags
+	this.Data["Wd"] = wd
+}
+
+func (this *ManagerController) AddTags() {
+	tags := this.GetString("tags")
+	if tags != "" {
+		tags = strings.Join(strings.Split(tags, "\n"), ",")
+		models.NewLabel().InsertOrUpdateMulti(tags)
+	}
+	this.JsonResult(0, "新增标签成功")
+}
+
+func (this *ManagerController) DelTags() {
+	id, _ := this.GetInt("id")
+	if id > 0 {
+		orm.NewOrm().QueryTable(models.NewLabel()).Filter("label_id", id).Delete()
+	}
+	this.JsonResult(0, "标签删除成功")
 }
 
 // 添加用户.
@@ -296,35 +427,36 @@ func (this *ManagerController) DeleteMember() {
 	this.JsonResult(0, "ok")
 }
 
-//项目列表.
+//书籍列表.
 func (this *ManagerController) Books() {
 
 	pageIndex, _ := this.GetInt("page", 1)
 	private, _ := this.GetInt("private")
+	wd := this.GetString("wd")
 
-	books, totalCount, err := models.NewBookResult().FindToPager(pageIndex, conf.PageSize, private)
-	if err != nil {
-		this.Abort("404")
-	}
+	size := conf.PageSize
+
+	books, totalCount, _ := models.NewBookResult().FindToPager(pageIndex, size, private, wd)
 
 	if totalCount > 0 {
-		this.Data["PageHtml"] = utils.NewPaginations(conf.RollPage, totalCount, conf.PageSize, pageIndex, beego.URLFor("ManagerController.Books"), fmt.Sprintf("&private=%v", private))
+		this.Data["PageHtml"] = utils.NewPaginations(conf.RollPage, totalCount, size, pageIndex, beego.URLFor("ManagerController.Books"), fmt.Sprintf("&private=%v&wd=%v", private, wd))
 	} else {
 		this.Data["PageHtml"] = ""
 	}
 
 	this.Data["Lists"] = books
+	this.Data["Wd"] = wd
 	this.Data["IsBooks"] = true
 	this.GetSeoByPage("manage_project_list", map[string]string{
-		"title":       "项目管理 - " + this.Sitename,
-		"keywords":    "项目管理",
+		"title":       "书籍管理 - " + this.Sitename,
+		"keywords":    "书籍管理",
 		"description": this.Sitename + "专注于文档在线写作、协作、分享、阅读与托管，让每个人更方便地发布、分享和获得知识。",
 	})
 	this.Data["Private"] = private
 	this.TplName = "manager/books.html"
 }
 
-//编辑项目.
+//编辑书籍.
 func (this *ManagerController) EditBook() {
 
 	identify := this.GetString(":key")
@@ -346,7 +478,7 @@ func (this *ManagerController) EditBook() {
 		pin, _ := this.GetInt("pin", 0)
 
 		if strings.Count(description, "") > 500 {
-			this.JsonResult(6004, "项目描述不能大于500字")
+			this.JsonResult(6004, "书籍描述不能大于500字")
 		}
 		if commentStatus != "open" && commentStatus != "closed" && commentStatus != "group_only" && commentStatus != "registered_only" {
 			commentStatus = "closed"
@@ -381,7 +513,7 @@ func (this *ManagerController) EditBook() {
 			}
 			client := models.NewElasticSearchClient()
 			if errSearch := client.BuildIndex(es); errSearch != nil && client.On {
-				beego.Error(err.Error())
+				beego.Error(errSearch.Error())
 			}
 		}()
 
@@ -393,66 +525,77 @@ func (this *ManagerController) EditBook() {
 	this.Data["Model"] = book
 
 	this.GetSeoByPage("manage_project_edit", map[string]string{
-		"title":       "项目设置 - " + this.Sitename,
-		"keywords":    "项目设置",
+		"title":       "书籍设置 - " + this.Sitename,
+		"keywords":    "书籍设置",
 		"description": this.Sitename + "专注于文档在线写作、协作、分享、阅读与托管，让每个人更方便地发布、分享和获得知识。",
 	})
 	this.TplName = "manager/edit_book.html"
 }
 
-// 删除项目.
+// 删除书籍.
 func (this *ManagerController) DeleteBook() {
-
-	bookId, _ := this.GetInt("book_id", 0)
-	if bookId <= 0 {
+	var bookIds []int
+	beego.Debug(this.Ctx.Request.Form)
+	if ids, ok := this.Ctx.Request.Form["book_id"]; ok {
+		for _, id := range ids {
+			if v, _ := strconv.Atoi(id); v > 0 {
+				bookIds = append(bookIds, v)
+			}
+		}
+	}
+	if len(bookIds) <= 0 {
 		this.JsonResult(6001, "参数错误")
 	}
 
 	//用户密码
 	pwd := this.GetString("password")
 	if m, err := models.NewMember().Login(this.Member.Account, pwd); err != nil || m.MemberId == 0 {
-		this.JsonResult(1, "项目删除失败，您的登录密码不正确")
+		this.JsonResult(1, "书籍删除失败，您的登录密码不正确")
 	}
-
+	identify := strings.TrimSpace(this.GetString("identify"))
 	book := models.NewBook()
-	b, _ := book.Find(bookId)
-	if b.Identify != this.GetString("identify") {
-		this.JsonResult(1, "项目删除失败，您输入的文档标识不正确")
-	}
-	err := book.ThoroughDeleteBook(bookId)
+	client := models.NewElasticSearchClient()
+	for _, bookID := range bookIds {
+		if identify != "" {
+			if b, _ := book.FindByIdentify(identify, "book_id"); b.BookId != bookID {
+				this.JsonResult(6002, "书籍标识输入不正确")
+			}
+		}
 
-	if err == orm.ErrNoRows {
-		this.JsonResult(6002, "项目不存在")
-	}
-	if err != nil {
-		logs.Error("DeleteBook => ", err)
-		this.JsonResult(6003, "删除失败")
-	}
-
-	go func() {
-		client := models.NewElasticSearchClient()
-		if errDel := client.DeleteIndex(bookId, true); errDel != nil && client.On {
+		err := book.ThoroughDeleteBook(bookID)
+		if err == orm.ErrNoRows {
+			this.JsonResult(6002, "书籍不存在")
+		}
+		if err != nil {
+			logs.Error("DeleteBook => ", err)
+			this.JsonResult(6003, "删除失败")
+		}
+		if errDel := client.DeleteIndex(bookID, true); errDel != nil && client.On {
 			beego.Error(errDel.Error())
 		}
-	}()
-
-	this.JsonResult(0, "项目删除成功")
+	}
+	go models.CountCategory()
+	this.JsonResult(0, "书籍删除成功")
 }
 
 // CreateToken 创建访问来令牌.
 func (this *ManagerController) CreateToken() {
+
+	if this.forbidGeneralRole() {
+		this.JsonResult(6001, "您的角色非作者和管理员，无法创建访问令牌")
+	}
 
 	action := this.GetString("action")
 	identify := this.GetString("identify")
 
 	book, err := models.NewBook().FindByFieldFirst("identify", identify)
 	if err != nil {
-		this.JsonResult(6001, "项目不存在")
+		this.JsonResult(6001, "书籍不存在")
 	}
 
 	if action == "create" {
 		if book.PrivatelyOwned == 0 {
-			this.JsonResult(6001, "公开项目不能创建阅读令牌")
+			this.JsonResult(6001, "公开书籍不能创建阅读令牌")
 		}
 
 		book.PrivateToken = string(utils.Krand(conf.GetTokenSize(), utils.KC_RAND_KIND_ALL))
@@ -486,21 +629,27 @@ func (this *ManagerController) Setting() {
 		if err := models.NewElasticSearchClient().Init(); err != nil {
 			this.JsonResult(1, err.Error())
 		}
-
+		models.NewSign().UpdateSignRule()
+		models.NewReadRecord().UpdateReadingRule()
 		this.JsonResult(0, "ok")
 	}
 
-	this.Data["SITE_TITLE"] = this.Option["SITE_NAME"]
 	for _, item := range options {
-		this.Data[item.OptionName] = item
+		if item.OptionName == "APP_PAGE" {
+			this.Data["APP_PAGE"] = item.OptionValue
+			this.Data["M_APP_PAGE"] = item
+		} else {
+			this.Data[item.OptionName] = item
+		}
 	}
+	this.Data["SITE_TITLE"] = this.Option["SITE_NAME"]
 
 	this.Data["IsSetting"] = true
 	this.Data["SeoTitle"] = "配置管理"
 	this.TplName = "manager/setting.html"
 }
 
-// Transfer 转让项目.
+// Transfer 转让书籍.
 func (this *ManagerController) Transfer() {
 	account := this.GetString("account")
 	if account == "" {
@@ -531,7 +680,7 @@ func (this *ManagerController) Transfer() {
 	rel, err := models.NewRelationship().FindFounder(book.BookId)
 	if err != nil {
 		beego.Error("FindFounder => ", err)
-		this.JsonResult(6009, "查询项目创始人失败")
+		this.JsonResult(6009, "查询书籍创始人失败")
 	}
 
 	if member.MemberId == rel.MemberId {
@@ -596,7 +745,7 @@ func (this *ManagerController) SetCommentStatus() {
 	this.JsonResult(0, "设置成功")
 }
 
-//设置项目私有状态.
+//设置书籍私有状态.
 func (this *ManagerController) PrivatelyOwned() {
 	status := this.GetString("status")
 	identify := this.GetString("identify")
@@ -662,11 +811,6 @@ func (this *ManagerController) AttachList() {
 		this.Data["PageHtml"] = ""
 	}
 
-	for _, item := range attachList {
-		p := filepath.Join(commands.WorkingDirectory, item.FilePath)
-		item.IsExist = utils.FileExists(p)
-	}
-
 	this.Data["Lists"] = attachList
 	this.Data["IsAttach"] = true
 	this.TplName = "manager/attach_list.html"
@@ -689,7 +833,6 @@ func (this *ManagerController) AttachDetailed() {
 		this.Abort("404")
 	}
 
-	attach.FilePath = filepath.Join(commands.WorkingDirectory, attach.FilePath)
 	attach.HttpPath = this.BaseUrl() + attach.HttpPath
 	attach.IsExist = utils.FileExists(attach.FilePath)
 	this.Data["Model"] = attach
@@ -704,16 +847,22 @@ func (this *ManagerController) AttachDelete() {
 		this.Abort("404")
 	}
 
-	attach, err := models.NewAttachment().Find(attachId)
-	if err != nil {
-		beego.Error("AttachDelete => ", err)
-		this.JsonResult(6001, err.Error())
+	attach, _ := models.NewAttachment().Find(attachId)
+	if attach.AttachmentId == 0 {
+		this.JsonResult(0, "ok")
 	}
 
-	if err := attach.Delete(); err != nil {
-		beego.Error("AttachDelete => ", err)
-		this.JsonResult(6002, err.Error())
+	obj := strings.TrimLeft(attach.FilePath, "./")
+	switch utils.StoreType {
+	case utils.StoreOss:
+		store.ModelStoreOss.DelFromOss(obj)
+		if bucket, err := store.ModelStoreOss.GetBucket(); err == nil {
+			bucket.SetObjectACL(obj, oss.ACLPrivate)
+		}
+	case utils.StoreLocal:
+		os.Remove(obj)
 	}
+	attach.Delete()
 	this.JsonResult(0, "ok")
 }
 
@@ -742,7 +891,73 @@ func (this *ManagerController) Seo() {
 	this.TplName = "manager/seo.html"
 }
 
-//更行书籍项目的排序
+func (this *ManagerController) UpdateAds() {
+	id, _ := this.GetInt("id")
+	field := this.GetString("field")
+	value := this.GetString("value")
+	if field == "" {
+		this.JsonResult(1, "字段不能为空")
+	}
+	_, err := orm.NewOrm().QueryTable(models.NewAdsCont()).Filter("id", id).Update(orm.Params{field: value})
+	if err != nil {
+		this.JsonResult(1, err.Error())
+	}
+	go models.UpdateAdsCache()
+	this.JsonResult(0, "操作成功")
+}
+
+func (this *ManagerController) DelAds() {
+	id, _ := this.GetInt("id")
+	_, err := orm.NewOrm().QueryTable(models.NewAdsCont()).Filter("id", id).Delete()
+	if err != nil {
+		this.JsonResult(1, err.Error())
+	}
+	go models.UpdateAdsCache()
+	this.JsonResult(0, "删除成功")
+}
+
+//广告管理
+func (this *ManagerController) Ads() {
+	if this.Ctx.Request.Method == http.MethodPost {
+		pid, _ := this.GetInt("pid")
+		if pid <= 0 {
+			this.JsonResult(1, "请选择广告位")
+		}
+		ads := &models.AdsCont{
+			Title:  this.GetString("title"),
+			Code:   this.GetString("code"),
+			Status: true,
+			Pid:    pid,
+		}
+		start, err := dateparse.ParseAny(this.GetString("start"))
+		if err != nil {
+			start = time.Now()
+		}
+		end, err := dateparse.ParseAny(this.GetString("end"))
+		if err != nil {
+			end = time.Now().Add(24 * time.Hour * 730)
+		}
+		ads.Start = int(start.Unix())
+		ads.End = int(end.Unix())
+		_, err = orm.NewOrm().Insert(ads)
+		if err != nil {
+			this.JsonResult(1, err.Error())
+		}
+		go models.UpdateAdsCache()
+		this.JsonResult(0, "新增广告成功")
+	} else {
+		layout := "2006-01-02"
+		this.Data["Mobile"] = this.GetString("mobile", "0")
+		this.Data["Positions"] = models.NewAdsCont().GetPositions()
+		this.Data["Lists"] = models.NewAdsCont().Lists(this.GetString("mobile", "0") == "1")
+		this.Data["IsAds"] = true
+		this.Data["Now"] = time.Now().Format(layout)
+		this.Data["Next"] = time.Now().Add(time.Hour * 24 * 730).Format(layout)
+		this.TplName = "manager/ads.html"
+	}
+}
+
+//更行书籍书籍的排序
 func (this *ManagerController) UpdateBookSort() {
 	bookId, _ := this.GetInt("book_id")
 	orderIndex, _ := this.GetInt("value")
@@ -832,6 +1047,8 @@ func (this *ManagerController) UpdateCateIcon() {
 	if id == 0 {
 		this.JsonResult(1, "参数不正确")
 	}
+
+	data := make(map[string]interface{})
 	model := new(models.Category)
 	if cate := model.Find(id); cate.Id > 0 {
 		cate.Icon = strings.TrimLeft(cate.Icon, "/")
@@ -848,8 +1065,10 @@ func (this *ManagerController) UpdateCateIcon() {
 			case utils.StoreOss:
 				store.ModelStoreOss.MoveToOss(tmpFile, tmpFile, true, false)
 				store.ModelStoreOss.DelFromOss(cate.Icon)
+				data["icon"] = utils.ShowImg(tmpFile)
 			case utils.StoreLocal:
 				store.ModelStoreLocal.DelFiles(cate.Icon)
+				data["icon"] = "/" + tmpFile
 			}
 			err = model.UpdateByField(cate.Id, "icon", "/"+tmpFile)
 		}
@@ -858,7 +1077,7 @@ func (this *ManagerController) UpdateCateIcon() {
 	if err != nil {
 		this.JsonResult(1, err.Error())
 	}
-	this.JsonResult(0, "更新成功")
+	this.JsonResult(0, "更新成功", data)
 }
 
 //友情链接

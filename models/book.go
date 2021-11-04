@@ -36,14 +36,14 @@ const (
 // Book struct .
 type Book struct {
 	BookId            int       `orm:"pk;auto;unique;column(book_id)" json:"book_id"`
-	BookName          string    `orm:"column(book_name);size(500)" json:"book_name"`      // BookName 项目名称.
-	Identify          string    `orm:"column(identify);size(100);unique" json:"identify"` // Identify 项目唯一标识.
-	OrderIndex        int       `orm:"column(order_index);type(int);default(0)" json:"order_index"`
+	BookName          string    `orm:"column(book_name);size(500)" json:"book_name"`      // BookName 书籍名称.
+	Identify          string    `orm:"column(identify);size(100);unique" json:"identify"` // Identify 书籍唯一标识.
+	OrderIndex        int       `orm:"column(order_index);type(int);default(0);index" json:"order_index"`
 	Pin               int       `orm:"column(pin);type(int);default(0)" json:"pin"`       // pin值，用于首页固定显示
-	Description       string    `orm:"column(description);size(2000)" json:"description"` // Description 项目描述.
+	Description       string    `orm:"column(description);size(2000)" json:"description"` // Description 书籍描述.
 	Label             string    `orm:"column(label);size(500)" json:"label"`
-	PrivatelyOwned    int       `orm:"column(privately_owned);type(int);default(0)" json:"privately_owned"` // PrivatelyOwned 项目私有： 0 公开/ 1 私有
-	PrivateToken      string    `orm:"column(private_token);size(500);null" json:"private_token"`           // 当项目是私有时的访问Token.
+	PrivatelyOwned    int       `orm:"column(privately_owned);type(int);default(0)" json:"privately_owned"` // PrivatelyOwned 书籍私有： 0 公开/ 1 私有
+	PrivateToken      string    `orm:"column(private_token);size(500);null" json:"private_token"`           // 当书籍是私有时的访问Token.
 	Status            int       `orm:"column(status);type(int);default(0)" json:"status"`                   //状态：0 正常/1 已删除
 	Editor            string    `orm:"column(editor);size(50)" json:"editor"`                               //默认的编辑器.
 	DocCount          int       `orm:"column(doc_count);type(int)" json:"doc_count"`                        // DocCount 包含文档数量.
@@ -52,19 +52,21 @@ type Book struct {
 	Cover             string    `orm:"column(cover);size(1000)" json:"cover"`                              //封面地址
 	Theme             string    `orm:"column(theme);size(255);default(default)" json:"theme"`              //主题风格
 	CreateTime        time.Time `orm:"type(datetime);column(create_time);auto_now_add" json:"create_time"` // CreateTime 创建时间 .
-	MemberId          int       `orm:"column(member_id);size(100)" json:"member_id"`
+	MemberId          int       `orm:"column(member_id);size(100);index" json:"member_id"`
 	ModifyTime        time.Time `orm:"type(datetime);column(modify_time);auto_now" json:"modify_time"`
-	ReleaseTime       time.Time `orm:"type(datetime);column(release_time);" json:"release_time"`   //项目发布时间，每次发布都更新一次，如果文档更新时间小于发布时间，则文档不再执行发布
+	ReleaseTime       time.Time `orm:"type(datetime);column(release_time);" json:"release_time"`   //书籍发布时间，每次发布都更新一次，如果文档更新时间小于发布时间，则文档不再执行发布
 	GenerateTime      time.Time `orm:"type(datetime);column(generate_time);" json:"generate_time"` //下载文档生成时间
 	LastClickGenerate time.Time `orm:"type(datetime);column(last_click_generate)" json:"-"`        //上次点击上传文档的时间，用于显示频繁点击浪费服务器硬件资源的情况
 	Version           int64     `orm:"type(bigint);column(version);default(0)" json:"version"`
-	Vcnt              int       `orm:"column(vcnt);default(0)" json:"vcnt"`    // 文档项目被阅读次数
-	Star              int       `orm:"column(star);default(0)" json:"star"`    // 文档项目被收藏次数
-	Score             int       `orm:"column(score);default(40)" json:"score"` // 文档项目评分，默认40，即4.0星
+	Vcnt              int       `orm:"column(vcnt);default(0)" json:"vcnt"`    // 书籍被阅读次数
+	Star              int       `orm:"column(star);default(0)" json:"star"`    // 书籍被收藏次数
+	Score             int       `orm:"column(score);default(40)" json:"score"` // 书籍评分，默认40，即4.0星
 	CntScore          int       // 评分人数
 	CntComment        int       // 评论人数
-	Author            string    `orm:"size(50)"`           //原作者，即来源
-	AuthorURL         string    `orm:"column(author_url)"` //原作者链接，即来源链接
+	Author            string    `orm:"size(50)"`            //原作者，即来源
+	AuthorURL         string    `orm:"column(author_url)"`  //原作者链接，即来源链接
+	AdTitle           string    `orm:"default()"`           // 文字广告标题
+	AdLink            string    `orm:"default();size(512)"` // 文字广告链接
 	Lang              string    `orm:"size(10);index;default(zh)"`
 }
 
@@ -85,6 +87,33 @@ func NewBook() *Book {
 	return &Book{}
 }
 
+// minRole 最小的角色权限
+//conf.BookFounder
+//conf.BookAdmin
+//conf.BookEditor
+//conf.BookObserver
+func (m *Book) HasProjectAccess(identify string, memberId int, minRole int) bool {
+	book := NewBook()
+	rel := NewRelationship()
+	o := orm.NewOrm()
+	o.QueryTable(book).Filter("identify", identify).One(book, "book_id")
+	if book.BookId <= 0 {
+		return false
+	}
+	o.QueryTable(rel).Filter("book_id", book.BookId).Filter("member_id", memberId).One(rel)
+	if rel.RelationshipId <= 0 {
+		return false
+	}
+	return rel.RoleId <= minRole
+}
+
+func (m *Book) Sorted(limit int, orderField string) (books []Book) {
+	o := orm.NewOrm()
+	fields := []string{"book_id", "book_name", "identify", "cover", "vcnt", "star", "cnt_comment"}
+	o.QueryTable(m).Filter("order_index__gte", 0).Filter("privately_owned", 0).OrderBy("-"+orderField).Limit(limit).All(&books, fields...)
+	return
+}
+
 func (m *Book) Insert() (err error) {
 	o := orm.NewOrm()
 	if _, err = o.Insert(m); err != nil {
@@ -101,7 +130,7 @@ func (m *Book) Insert() (err error) {
 	relationship.MemberId = m.MemberId
 
 	if err = relationship.Insert(); err != nil {
-		logs.Error("插入项目与用户关联 => ", err)
+		logs.Error("插入书籍与用户关联 => ", err)
 		return err
 	}
 
@@ -170,7 +199,7 @@ func (m *Book) FindByIdentify(identify string, cols ...string) (book *Book, err 
 	return
 }
 
-//分页查询指定用户的项目
+//分页查询指定用户的书籍
 //按照最新的进行排序
 func (m *Book) FindToPager(pageIndex, pageSize, memberId int, PrivatelyOwned ...int) (books []*BookResult, totalCount int, err error) {
 
@@ -189,7 +218,7 @@ func (m *Book) FindToPager(pageIndex, pageSize, memberId int, PrivatelyOwned ...
 
 	offset := (pageIndex - 1) * pageSize
 	sql2 := "SELECT book.*,rel.member_id,rel.role_id,m.account as create_name FROM " + m.TableNameWithPrefix() + " AS book" +
-		" LEFT JOIN " + relationship.TableNameWithPrefix() + " AS rel ON book.book_id=rel.book_id AND rel.member_id = ? AND rel.role_id=0" +
+		" LEFT JOIN " + relationship.TableNameWithPrefix() + " AS rel ON book.book_id=rel.book_id AND rel.member_id = ? " +
 		" LEFT JOIN " + NewMember().TableNameWithPrefix() + " AS m ON rel.member_id=m.member_id " +
 		" WHERE rel.relationship_id > 0 %v ORDER BY book.book_id DESC LIMIT " + fmt.Sprintf("%d,%d", offset, pageSize)
 
@@ -198,7 +227,7 @@ func (m *Book) FindToPager(pageIndex, pageSize, memberId int, PrivatelyOwned ...
 	}
 	_, err = o.Raw(sql2, memberId).QueryRows(&books)
 	if err != nil {
-		logs.Error("分页查询项目列表 => ", err)
+		logs.Error("分页查询书籍列表 => ", err)
 		return
 	}
 
@@ -216,13 +245,13 @@ func (m *Book) FindToPager(pageIndex, pageSize, memberId int, PrivatelyOwned ...
 				books[index].LastModifyText = text.Account + " 于 " + text.ModifyTime.Format("2006-01-02 15:04:05")
 			}
 
-			if book.RoleId == 0 {
+			if book.RoleId == conf.BookFounder {
 				book.RoleName = "创始人"
-			} else if book.RoleId == 1 {
+			} else if book.RoleId == conf.BookAdmin {
 				book.RoleName = "管理员"
-			} else if book.RoleId == 2 {
+			} else if book.RoleId == conf.BookEditor {
 				book.RoleName = "编辑者"
-			} else if book.RoleId == 3 {
+			} else if book.RoleId == conf.BookObserver {
 				book.RoleName = "观察者"
 			}
 		}
@@ -230,7 +259,7 @@ func (m *Book) FindToPager(pageIndex, pageSize, memberId int, PrivatelyOwned ...
 	return
 }
 
-// 彻底删除项目.
+// 彻底删除书籍.
 func (m *Book) ThoroughDeleteBook(id int) (err error) {
 	if id <= 0 {
 		return ErrInvalidParameter
@@ -295,9 +324,10 @@ func (m *Book) ThoroughDeleteBook(id int) (err error) {
 	if err = o.Commit(); err != nil {
 		return err
 	}
-	//删除oss中项目对应的文件夹
+	//删除oss中书籍对应的文件夹
 	switch utils.StoreType {
 	case utils.StoreLocal: //删除本地存储，记得加上uploads
+		m.Cover = strings.ReplaceAll(m.Cover, "\\", "/")
 		if m.Cover != beego.AppConfig.DefaultString("cover", "/static/images/book.png") {
 			os.Remove(strings.TrimLeft(m.Cover, "/ ")) //删除封面
 		}
@@ -340,7 +370,7 @@ func (m *Book) HomeData(pageIndex, pageSize int, orderType BookOrder, lang strin
 		order = "pin desc,order_index desc"
 	case OrderLatestRecommend: //最新推荐
 		cond = append(cond, "order_index>0")
-		order = "book_id desc"
+		order = "release_time desc"
 	case OrderPopular: //受欢迎
 		order = "pin desc,star desc,vcnt desc"
 	case OrderLatest, OrderNew: //最新发布
@@ -528,7 +558,7 @@ func (book *Book) ToBookResult() (m *BookResult) {
 	m.CommentCount = book.CommentCount
 	m.CreateTime = book.CreateTime
 	m.ModifyTime = book.ModifyTime
-	m.Cover = book.Cover
+	m.Cover = strings.ReplaceAll(book.Cover, "\\", "/")
 	m.MemberId = book.MemberId
 	m.Label = book.Label
 	m.Status = book.Status
@@ -542,6 +572,8 @@ func (book *Book) ToBookResult() (m *BookResult) {
 	m.CntComment = book.CntComment
 	m.Author = book.Author
 	m.AuthorURL = book.AuthorURL
+	m.AdTitle = book.AdTitle
+	m.AdLink = book.AdLink
 	m.Lang = book.Lang
 
 	if book.Theme == "" {
@@ -575,9 +607,12 @@ func (m *Book) Replace(bookId int, src, dst string) {
 			ds := new(DocumentStore)
 			o.QueryTable(ds).Filter("document_id", doc.DocumentId).One(ds)
 			if ds.DocumentId > 0 {
-				ds.Markdown = strings.Replace(ds.Markdown, src, dst, -1)
-				ds.Content = strings.Replace(ds.Content, src, dst, -1)
-				o.Update(ds)
+				if count := strings.Count(ds.Markdown, src); count > 0 { // 如果没找到内容，则不更新这篇文章
+					ds.Markdown = strings.Replace(ds.Markdown, src, dst, count)
+					ds.Content = ""
+					ds.UpdatedAt = time.Now()
+					o.Update(ds)
+				}
 			}
 		}
 	}
@@ -631,5 +666,31 @@ func (n *Book) SearchBook(wd string, page, size int) (books []Book, cnt int, err
 		_, err = o.Raw(sql+" limit ? offset ?", wd, wd, wd, size, (page-1)*size).QueryRows(&books)
 	}
 
+	return
+}
+
+// search books with labels
+func (b *Book) SearchBookByLabel(labels []string, limit int, excludeIds []int) (bookIds []int, err error) {
+	bookIds = []int{}
+	if len(labels) == 0 {
+		return
+	}
+
+	rawRegex := strings.Join(labels, "|")
+
+	excludeClause := ""
+	if len(excludeIds) == 1 {
+		excludeClause = fmt.Sprintf("book_id != %d AND", excludeIds[0])
+	} else if len(excludeIds) > 1 {
+		excludeVal := strings.Replace(strings.Trim(fmt.Sprint(excludeIds), "[]"), " ", ",", -1)
+		excludeClause = fmt.Sprintf("book_id NOT IN (%s) AND", excludeVal)
+	}
+
+	sql := fmt.Sprintf("SELECT book_id FROM md_books WHERE %v label REGEXP ? ORDER BY star DESC LIMIT ?", excludeClause)
+	o := orm.NewOrm()
+	_, err = o.Raw(sql, rawRegex, limit).QueryRows(&bookIds)
+	if err != nil {
+		logs.Error("failed to execute sql: %s, err: %s", sql, err.Error())
+	}
 	return
 }

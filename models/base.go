@@ -16,8 +16,40 @@ import (
 	"github.com/astaxie/beego/orm"
 )
 
+type period string
+
+const (
+	PeriodDay      period = "day"
+	PeriodWeek     period = "week"
+	PeriodLastWeek period = "last-week"
+	PeriodMonth    period = "month"
+	PeriodLastMoth period = "last-month"
+	PeriodAll      period = "all"
+	PeriodYear     period = "year"
+)
+
+const dateFormat = "20060102"
+
+var cacheTime = beego.AppConfig.DefaultFloat("CacheTime", 60) // 1 分钟
+
+var (
+	AllowRegister = true
+	AllowVisitor  = true
+)
+
 func Init() {
 	initAPI()
+	initAdsCache()
+	initOptionCache()
+	NewSign().UpdateSignRule()          // 更新签到规则的全局变量
+	NewReadRecord().UpdateReadingRule() // 更新阅读计时规则的全局变量
+	go func() {
+		for {
+			AllowRegister = GetOptionValue("ENABLED_REGISTER", "true") == "true"
+			AllowVisitor = GetOptionValue("ENABLE_ANONYMOUS", "true") == "true"
+			time.Sleep(time.Second * 30)
+		}
+	}()
 }
 
 //设置增减
@@ -49,7 +81,7 @@ type SitemapDocs struct {
 
 //站点地图数据
 func SitemapData(page, listRows int) (totalRows int64, sitemaps []SitemapDocs) {
-	//获取公开的项目
+	//获取公开的书籍
 	var (
 		books   []Book
 		docs    []Document
@@ -95,7 +127,7 @@ func SitemapUpdate(domain string) {
 	)
 	domain = strings.TrimSuffix(domain, "/")
 	os.Mkdir("sitemap", os.ModePerm)
-	//查询公开的项目
+	//查询公开的书籍
 	qsBooks := o.QueryTable("md_books").Filter("privately_owned", 0)
 	limit := 10000
 	for i := 0; i < 10; i++ {
@@ -157,27 +189,17 @@ func SitemapUpdate(domain string) {
 	Sitemap.CreateSitemapIndex(si, "sitemap.xml")
 }
 
-// 统计书籍分类
-var counting = false
-
 type Count struct {
 	Cnt        int
 	CategoryId int
 }
 
+// CountCategory 统计书籍分类
 func CountCategory() {
-	if counting {
-		return
-	}
-	counting = true
-	defer func() {
-		counting = false
-	}()
-
 	var count []Count
 
 	o := orm.NewOrm()
-	sql := "select count(bc.id) cnt, bc.category_id from md_book_category bc left join md_books b on b.book_id=bc.book_id where b.privately_owned=0 group by bc.category_id"
+	sql := "select count(bc.id) cnt, bc.category_id from md_book_category bc left join md_books b on b.book_id=bc.book_id where b.privately_owned=0 and bc.category_id>0  group by bc.category_id"
 	o.Raw(sql).QueryRows(&count)
 	if len(count) == 0 {
 		return
@@ -195,21 +217,74 @@ func CountCategory() {
 	o.Begin()
 	defer func() {
 		if err != nil {
+			beego.Error(err)
 			o.Rollback()
 		} else {
 			o.Commit()
 		}
 	}()
 
-	o.QueryTable(tableCate).Update(orm.Params{"cnt": 0})
 	cateChild := make(map[int]int)
+	if _, err = o.QueryTable(tableCate).Filter("id__gt", 0).Update(orm.Params{"cnt": 0}); err != nil {
+		return
+	}
+
 	for _, item := range count {
-		if item.Cnt > 0 {
-			cateChild[item.CategoryId] = item.Cnt
-			_, err = o.QueryTable(tableCate).Filter("id", item.CategoryId).Update(orm.Params{"cnt": item.Cnt})
-			if err != nil {
-				return
-			}
+		cateChild[item.CategoryId] = item.Cnt
+		_, err = o.QueryTable(tableCate).Filter("id", item.CategoryId).Update(orm.Params{"cnt": item.Cnt})
+		if err != nil {
+			return
 		}
 	}
+}
+
+func getTimeRange(t time.Time, prd period) (start, end string) {
+	switch prd {
+	case PeriodWeek:
+		start, end = getWeek(t)
+	case PeriodLastWeek:
+		start, end = getWeek(t.AddDate(0, 0, -7))
+	case PeriodMonth:
+		start, end = getMonth(t)
+	case PeriodLastMoth:
+		start, end = getMonth(t.AddDate(0, -1, 0))
+	case PeriodAll:
+		start = "20060102"
+		end = "20401231"
+	case PeriodDay:
+		start = t.Format(dateFormat)
+		end = start
+	case PeriodYear:
+		start, end = getYear(t.AddDate(-1, 0, 0))
+	default:
+		start = t.Format(dateFormat)
+		end = start
+	}
+	return
+}
+
+func getWeek(t time.Time) (start, end string) {
+	if t.Weekday() == 0 {
+		start = t.Add(-7 * 24 * time.Hour).Format(dateFormat)
+		end = t.Format(dateFormat)
+	} else {
+		s := t.Add(-time.Duration(t.Weekday()-1) * 24 * time.Hour)
+		start = s.Format(dateFormat)
+		end = s.Add(6 * 24 * time.Hour).Format(dateFormat)
+	}
+	return
+}
+
+func getYear(t time.Time) (start, end string) {
+	month := time.Date(t.Year(), 1, 1, 0, 0, 0, 0, time.Local)
+	start = month.Format(dateFormat)
+	end = month.AddDate(0, 12, 0).Add(-24 * time.Hour).Format(dateFormat)
+	return
+}
+
+func getMonth(t time.Time) (start, end string) {
+	month := time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.Local)
+	start = month.Format(dateFormat)
+	end = month.AddDate(0, 1, 0).Add(-24 * time.Hour).Format(dateFormat)
+	return
 }

@@ -69,7 +69,7 @@
             "bold", "del", "italic", "quote", "ucwords", "uppercase", "lowercase", "|", 
             "h1", "h2", "h3", "h4", "h5", "h6", "|", 
             "list-ul", "list-ol", "hr", "|",
-            "link", "reference-link", "image", "code", "preformatted-text", "code-block", "table", "datetime", "emoji", "html-entities", "pagebreak", "|",
+            "link", "reference-link", "image", "audio", "video", "code", "preformatted-text", "code-block", "table", "datetime", "emoji", "html-entities", "pagebreak", "|",
             "goto-line", "watch", "preview", "fullscreen", "clear", "search", "|",
             "help", "info"
         ],
@@ -150,6 +150,15 @@
         imageUploadURL       : "",
         crossDomainUpload    : false,
         uploadCallbackURL    : "",
+
+        videoUpload          : false,
+        videoFormats         : ["ogm", "wmv", "asx", "mpg", "webm", "mp4", "ogv", "mpeg", "mov", "m4v", "avi"],
+        videoUploadURL       : "",
+
+        audioUpload          : false,
+        audioFormats         : ["flac", "wma", "weba", "aac", "oga", "ogg", "mp3", "webm", "mid", "wav", "opus", "m4a", "amr", "aiff", "au"],
+        audioUploadURL       : "",
+
         
         toc                  : true,           // Table of contents
         tocm                 : false,           // Using [TOCM], auto create ToC dropdown menu
@@ -206,6 +215,8 @@
             link             : "fa-link",
             "reference-link" : "fa-anchor",
             image            : "fa-picture-o",
+            audio            : "fa-file-audio-o",
+            video            : "fa-video-camera",
             code             : "fa-code",
             "preformatted-text" : "fa-file-code-o",
             "code-block"     : "fa-file-code-o",
@@ -252,6 +263,8 @@
                 link             : "链接",
                 "reference-link" : "引用链接",
                 image            : "添加图片",
+                audio            : "添加音频",
+                video            : "添加视频",
                 code             : "行内代码",
                 "preformatted-text" : "预格式文本 / 代码块（缩进风格）",
                 "code-block"     : "代码块（多语言风格）",
@@ -301,6 +314,26 @@
                     imageURLEmpty    : "错误：图片地址不能为空。",
                     uploadFileEmpty  : "错误：上传的图片不能为空。",
                     formatNotAllowed : "错误：只允许上传图片文件，允许上传的图片文件格式有："
+                },
+                audio : {
+                    title    : "添加音频",
+                    url      : "音频地址",
+                    link     : "海报链接",
+                    alt      : "音频描述",
+                    uploadButton     : "本地上传",
+                    videoURLEmpty    : "错误：音频地址不能为空。",
+                    uploadFileEmpty  : "错误：上传的音频不能为空。",
+                    formatNotAllowed : "错误：只允许上传音频文件，允许上传的音频文件格式有："
+                },
+                video : {
+                    title    : "添加视频",
+                    url      : "视频地址",
+                    link     : "海报链接",
+                    alt      : "视频描述",
+                    uploadButton     : "本地上传",
+                    videoURLEmpty    : "错误：视频地址不能为空。",
+                    uploadFileEmpty  : "错误：上传的视频不能为空。",
+                    formatNotAllowed : "错误：只允许上传视频文件，允许上传的视频文件格式有："
                 },
                 preformattedText : {
                     title             : "添加预格式文本或代码块", 
@@ -1272,7 +1305,7 @@
                     }
                 }
                 
-                if (name !== "link" && name !== "reference-link" && name !== "image" && name !== "code-block" && 
+                if (name !== "link" && name !== "reference-link" && name !== "image" && name !== "audio" && name !== "video" && name !== "code-block" && 
                     name !== "preformatted-text" && name !== "watch" && name !== "preview" && name !== "search" && name !== "fullscreen" && name !== "info") 
                 {
                     cm.focus();
@@ -1519,7 +1552,16 @@
             var $this            = this;
             var settings         = this.settings;
             var previewContainer = this.previewContainer;
-            
+            //实时解析脑图
+			try {
+			$('.mindmap').each(function() {
+				drawMindMap(this);
+			});				
+
+			} catch (e) {
+				console.log(e);
+
+			}            
             if (editormd.isIE8) {
                 return this;
             }
@@ -3106,6 +3148,12 @@
         image : function() {
             this.executePlugin("imageDialog", "image-dialog/image-dialog");
         },
+        audio : function() {
+            this.executePlugin("audioDialog", "audio-dialog/audio-dialog");
+        },
+        video : function() {
+            this.executePlugin("videoDialog", "video-dialog/video-dialog");
+        },
         
         code : function() {
             var cm        = this.cm;
@@ -3288,6 +3336,8 @@
         },
         
         "Shift-Ctrl-Alt-I" : "image",
+        "Shift-Ctrl-Alt-A" : "audio",
+        "Shift-Ctrl-Alt-V" : "video",
         "Shift-Ctrl-L"     : "link",
         "Shift-Ctrl-O"     : "list-ol",
         "Shift-Ctrl-P"     : "preformatted-text",
@@ -3564,20 +3614,22 @@
             text = trim(text);
             
             var escapedText    = text.toLowerCase().replace(/[^\w]+/g, "-");
+            var id = Math.floor(Math.random() * 1000000000 ).toString(36);
             var toc = {
                 text  : text,
                 level : level,
-                slug  : escapedText
+                slug  : escapedText,
+                id    : id
             };
             
-            var isChinese = /^[\u4e00-\u9fa5]+$/.test(text);
-            var id        = (isChinese) ? escape(text).replace(/\%/g, "") : text.toLowerCase().replace(/[^\w]+/g, "-");
+            //var isChinese = /^[\u4e00-\u9fa5]+$/.test(text);
+            //var id        = (isChinese) ? escape(text).replace(/\%/g, "") : text.toLowerCase().replace(/[^\w]+/g, "-");
 
             markdownToC.push(toc);
             
-            var headingHTML = "<h" + level + " id=\"h"+ level + "-" + this.options.headerPrefix + id +"\">";
+            var headingHTML = "<h" + level + " id=\""+ id +"\">";
             
-            headingHTML    += "<a name=\"" + text + "\" class=\"reference-link\"></a>";
+            headingHTML    += "<a name=\"" + id + "\" class=\"reference-link\"></a>";
             headingHTML    += "<span class=\"header-link octicon octicon-link\"></span>";
             headingHTML    += (hasLinkReg) ? this.atLink(this.emoji(linkText)) : this.atLink(this.emoji(text));
             headingHTML    += "</h" + level + ">";
@@ -3631,7 +3683,46 @@
             else if ( lang === "math" || lang === "latex" || lang === "katex")
             {
                 return "<p class=\"" + editormd.classNames.tex + "\">" + code + "</p>";
-            } 
+            }
+			else if (/^mindmap/i.test(lang))
+			{
+				lang=lang+" ";//加一个空格，便于解析各参数使用
+				//关于思维导图的说明：最好是将思维导图做成像公式一样的开关。本人试过一次，没成功，先凑合用着
+				// //editor.md里面实现思维导图有两种模式，一种是现在这种模式，该模式胜在简单，另一种可以采取插件的方式，即弹出对话框，在对话框中用百度的kityminder-editor编辑好后，生成json文件，在这里面来解析，后者胜在功能强大。还有一种比较笨的方法就是用百度脑图编辑好后，导出km文件，把km文件放在这里来解析。或者在这里编写后，去百度脑图美化
+				//喜欢动手的朋友还可加一个参数，将本章节的内容自动生成一个脑图，但必须注意的是，脑图必须有且只能有一个根节点，即“#根节点”。
+				//各参数解析开始
+				var sizeps = lang.match(/size:(mindmap-sm|mindmap-md|mindmap-lg)(?= )/i);
+				var Templateps = lang.match(/Template:(fresh-blue|filetree|fish-bone|right|structure|tianpan)(?= )/i);
+				var Themeps = lang.match(/Theme:(classic|classic-compact|fish|fresh-blue|fresh-blue-compat|fresh-green|fresh-green-compat|fresh-pink|fresh-pink-compat|fresh-purple|fresh-purple-compat|fresh-red|fresh-red-compat|fresh-soil|fresh-soil-compat|snow|snow-compact|tianpan|tianpan-compact|wire)(?= )/i);
+				var protocolps=lang.match(/protocol:(json|text|markdown|list)(?= )/i);
+				var tmpshowps=lang.match(/tmpshow:(true)(?= )/i);
+				var size=(sizeps!== null)?sizeps[1]:"mindmap-md";
+				var Theme=(Themeps!== null)?Themeps[1]:"fresh-blue";
+				var protocol=(protocolps!== null)?protocolps[1]:"markdown";
+				var Template=(Templateps!== null)?Templateps[1]:"default";
+				var tmpshow=(tmpshowps!== null)?"":"style=\"display:none;\"";
+				//参数解析结束
+				
+				//生成两个div，其中一个存放参数，一个存放待生成的数据。
+				if(protocol=="list"){
+					code=marked(code);
+				}else {
+				//先将code解析为json数据，并添加主题和模板，如果不先解析，按照官方文档，使用minder.execCommand('Template', "right");或minder.useTemplate;minder.setTemplate;等均没有效果，需要单独添加一个按钮或标签，等加载完才可以改变，有点无语。
+				var minder=new kityminder.Minder();
+				try {
+				var tmpcode = minder.decodeData(protocol,code);
+				tmpcode=tmpcode.fulfillValue;
+				tmpcode.template=Template;
+				tmpcode.theme=Theme;
+				code=JSON.stringify(tmpcode);
+				}catch(e)
+				{
+				}}
+				var mindmapoption="<div class=\"mindmapoption\" style=\"display:none;\" >" +  lang + "</div>";
+				var midmaptmpdiv="<div class=\"mindmaptmp\"" +tmpshow+" >" +  code + "</div>";
+				return "<div class=\"mindmap "+size+"\">"+mindmapoption+midmaptmpdiv+"</div>";				
+
+			}             
             else 
             {
 
@@ -3686,6 +3777,7 @@
         {
             var text  = toc[i].text;
             var level = toc[i].level;
+            var id    = toc[i].id;
             
             if (level < startLevel) {
                 continue;
@@ -3704,7 +3796,7 @@
                 html += "</ul></li>";
             }
 
-            html += "<li><a class=\"toc-level-" + level + "\" href=\"#" + text + "\" level=\"" + level + "\">" + text + "</a><ul>";
+            html += "<li><a class=\"toc-level-" + level + "\" href=\"#" + id + "\" level=\"" + level +"\" title=\""+text+ "\">" + text + "</a><ul>";
             lastLevel = level;
         }
         

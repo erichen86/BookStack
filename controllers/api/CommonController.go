@@ -11,6 +11,7 @@ import (
 
 	"github.com/TruthHun/html2json/html2json"
 
+	"github.com/TruthHun/BookStack/models/store"
 	"github.com/TruthHun/BookStack/oauth"
 
 	"github.com/PuerkitoBio/goquery"
@@ -130,13 +131,16 @@ func (this *CommonController) LoginBindWechat() {
 		we.Bind(we.Openid, member.MemberId)
 	} else {
 		*member, _ = models.NewMember().GetByUsername(form.Username)
-		if ok, _ := utils.PasswordVerify(member.Password, form.Password); !ok {
-			this.Response(http.StatusBadRequest, messageUsernameOrPasswordError)
+
+		if member.MemberId == 0 {
+			this.Response(http.StatusBadRequest, "您要绑定的用户不存在")
 		}
+
 		if ok, _ := utils.PasswordVerify(member.Password, form.Password); !ok {
 			beego.Error(err)
 			this.Response(http.StatusBadRequest, messageUsernameOrPasswordError)
 		}
+
 		we.Bind(we.Openid, member.MemberId)
 	}
 	this.login(*member)
@@ -190,7 +194,33 @@ func (this *CommonController) login(member models.Member) {
 		this.Response(http.StatusInternalServerError, messageInternalServerError)
 	}
 	user.Avatar = this.completeLink(utils.ShowImg(user.Avatar, "avatar"))
-	this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"user": user})
+	data := map[string]interface{}{"user": user}
+	this.Response(http.StatusOK, messageSuccess, data)
+}
+
+func (this *CommonController) GetUserMoreInfo() {
+	uid, _ := this.GetInt("uid")
+	if uid <= 0 {
+		this.Response(http.StatusBadRequest, messageBadRequest)
+	}
+	cols := []string{"create_time", "total_reading_time", "total_sign", "total_continuous_sign", "history_total_continuous_sign"}
+	m, err := models.NewMember().Find(uid, cols...)
+	if err != nil {
+		this.Response(http.StatusInternalServerError, messageInternalServerError)
+	}
+	rt := models.NewReadingTime()
+	u := UserMoreInfo{
+		MemberId:              uid,
+		SignedAt:              models.NewSign().LatestSignTime(uid),
+		CreatedAt:             int(m.CreateTime.Unix()),
+		TotalSign:             m.TotalSign,
+		TotalContinuousSign:   m.TotalContinuousSign,
+		HistoryContinuousSign: m.HistoryTotalContinuousSign,
+		TodayReading:          rt.GetReadingTime(uid, models.PeriodDay),
+		MonthReading:          rt.GetReadingTime(uid, models.PeriodMonth),
+		TotalReading:          m.TotalReadingTime,
+	}
+	this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"info": u})
 }
 
 // 【OK】
@@ -379,6 +409,10 @@ func (this *CommonController) SearchBook() {
 		this.Response(http.StatusBadRequest, messageBadRequest)
 	}
 
+	if models.NewOption().IsResponseEmptyForAPP(this.Version, wd) {
+		this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"total": 0})
+	}
+
 	var (
 		page, _  = this.GetInt("page", 1)
 		size, _  = this.GetInt("size", 10)
@@ -438,6 +472,10 @@ func (this *CommonController) SearchDoc() {
 		this.Response(http.StatusBadRequest, messageBadRequest)
 	}
 
+	if models.NewOption().IsResponseEmptyForAPP(this.Version, wd) {
+		this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"total": 0})
+	}
+
 	var (
 		page, _ = this.GetInt("page", 1)
 		size, _ = this.GetInt("size", 10)
@@ -477,7 +515,7 @@ func (this *CommonController) SearchDoc() {
 		}
 		total = count
 		for _, book := range result {
-			ids = append(ids, book.BookId)
+			ids = append(ids, book.DocumentId)
 		}
 	}
 
@@ -533,9 +571,13 @@ func (this *CommonController) Categories() {
 	if err != nil {
 		pid = -1
 	}
-
+	m := models.NewOption()
 	categories, _ := model.GetCates(pid, 1)
 	for idx, category := range categories {
+		if m.IsResponseEmptyForAPP(this.Version, category.Title) {
+			// 为0，APP端就不会显示该分类
+			category.Cnt = 0
+		}
 		if category.Icon != "" {
 			if category.Icon == "" {
 				category.Icon = "/static/images/cate.png"
@@ -722,6 +764,7 @@ func (this *CommonController) Read() {
 	identify := this.GetString("identify")
 	slice := strings.Split(identify, "/")
 	fromAPP, _ := this.GetBool("from-app") // 是否来自app
+	enhanceRichtext, _ := this.GetBool("enhance-richtext")
 	if len(slice) != 2 {
 		this.Response(http.StatusBadRequest, messageBadRequest)
 	}
@@ -766,7 +809,7 @@ func (this *CommonController) Read() {
 		beego.Error(err.Error())
 	}
 
-	//项目阅读人次+1
+	//书籍阅读人次+1
 	if err = models.SetIncreAndDecre("md_books", "vcnt",
 		fmt.Sprintf("book_id=%v", doc.BookId),
 		true, 1,
@@ -789,7 +832,9 @@ func (this *CommonController) Read() {
 	)
 	// 图片链接地址补全
 	if doc.Release != "" {
-		if fromAPP { // 兼容 app
+		if enhanceRichtext {
+			nodes = this.handleReleaseV3(doc.Release, bookIdentify)
+		} else if fromAPP { // 兼容 app
 			nodes = this.handleReleaseV2(doc.Release, bookIdentify)
 		} else {
 			// 兼容微信小程序
@@ -797,7 +842,7 @@ func (this *CommonController) Read() {
 		}
 	}
 
-	if fromAPP {
+	if fromAPP || enhanceRichtext {
 		utils.CopyObject(doc, &apiDocV2)
 		apiDocV2.Release = nodes
 		apiDocV2.Bookmark = isMark
@@ -817,8 +862,11 @@ func (this *CommonController) handleReleaseV1(release string, bookIdentify strin
 	} else {
 		// 处理svg
 		query = utils.HandleSVG(query, bookIdentify)
+		query.Find(".reference-link").Remove()
+		query.Find(".header-link").Remove()
+
 		allTags := make(map[string]bool)
-		query.Find("*").Each(func(i int, selection *goquery.Selection) {
+		query.Find("body").Find("*").Each(func(i int, selection *goquery.Selection) {
 			if len(selection.Nodes) > 0 {
 				allTags[strings.ToLower(selection.Nodes[0].Data)] = true
 			}
@@ -837,24 +885,19 @@ func (this *CommonController) handleReleaseV1(release string, bookIdentify strin
 			}
 		}
 
-		query.Find(".reference-link").Remove()
-		query.Find(".header-link").Remove()
-
 		weixinTagsMap.Range(func(tag, value interface{}) bool {
 			t := tag.(string)
 			query.Find(t).AddClass("-" + t).RemoveAttr("id")
 			return true
 		})
 
-		hasImage := false
 		query.Find("img").Each(func(i int, contentSelection *goquery.Selection) {
-			hasImage = true
 			if src, ok := contentSelection.Attr("src"); ok {
 				contentSelection.SetAttr("src", this.completeLink(src))
 			}
 		})
 
-		htmlStr, err = query.Html()
+		htmlStr, err = query.Find("body").Html()
 		if err != nil {
 			beego.Error(err)
 		}
@@ -872,8 +915,55 @@ func (this *CommonController) handleReleaseV2(release, bookIdentify string) inte
 	utils.HandleSVG(query, bookIdentify)
 	query.Find(".reference-link").Remove()
 	query.Find(".header-link").Remove()
+	release, _ = query.Html()
 
 	nodes, err := html2json.NewDefault().Parse(release, models.GetAPIStaticDomain())
+	if err != nil {
+		beego.Error(err)
+		return release
+	}
+	return nodes
+}
+
+func (this *CommonController) handleReleaseV3(release, bookIdentify string) interface{} {
+	query, err := goquery.NewDocumentFromReader(bytes.NewBufferString(release))
+	if err != nil {
+		beego.Error(err)
+		return release
+	}
+	// 处理svg
+	utils.HandleSVG(query, bookIdentify)
+	query.Find(".reference-link").Remove()
+	query.Find(".header-link").Remove()
+	medias := []string{"audio", "video"}
+	for _, tag := range medias {
+		query.Find(tag).Each(func(idx int, sel *goquery.Selection) {
+			src, ok := sel.Attr("src")
+			if ok && !(strings.HasPrefix(src, "https://") || strings.HasPrefix(src, "http://")) {
+				if utils.StoreType == utils.StoreOss { // OSS 云存储，则使用OSS签名，否则使用本地存储的链接签名
+					if bucket, err := store.ModelStoreOss.GetBucket(); err == nil {
+						src = strings.TrimLeft(src, "/")
+						src, _ = bucket.SignURL(src, http.MethodGet, utils.MediaDuration)
+						if slice := strings.Split(src, "/"); len(slice) > 2 {
+							src = strings.Join(slice[3:], "/")
+						}
+					}
+				} else {
+					if sign, err := utils.GenerateMediaSign(src, time.Now().UnixNano(), time.Duration(utils.MediaDuration)); err == nil {
+						if strings.Contains(src, "?") {
+							src = src + "&sign=" + sign
+						} else {
+							src = src + "?sign=" + sign
+						}
+					}
+				}
+			}
+			sel.SetAttr("src", src)
+		})
+	}
+
+	release, _ = query.Html()
+	nodes, err := html2json.NewDefault().ParseByByteV2([]byte(release), models.GetAPIStaticDomain())
 	if err != nil {
 		beego.Error(err)
 		return release
@@ -885,8 +975,17 @@ func (this *CommonController) handleReleaseV2(release, bookIdentify string) inte
 func (this *CommonController) Banners() {
 	t := this.GetString("type", "wechat")
 	banners, _ := models.NewBanner().Lists(t)
-	// TODO: 直接在这里返回横幅尺寸，不用在小程序文件中进行配置
-	this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"banners": banners, "size": beego.AppConfig.DefaultString("bannerSize", "825x315")})
+	bannerSize, _ := strconv.ParseFloat(models.GetOptionValue("MOBILE_BANNER_SIZE", "2.619"), 64)
+	if bannerSize <= 0 {
+		bannerSize = 2.619
+	}
+
+	for idx, banner := range banners {
+		banner.Image = this.completeLink(banner.Image)
+		banners[idx] = banner
+	}
+
+	this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"banners": banners, "size": bannerSize})
 }
 
 func (this *CommonController) Download() {
@@ -937,16 +1036,15 @@ func (this *CommonController) Bookshelf() {
 		this.Response(http.StatusBadRequest, messageBadRequest)
 	}
 
+	cid, _ := this.GetInt("cid")
+	withCate, _ := this.GetInt("with-cate", 0)
 	size, _ := this.GetInt("size", 10)
-
 	size = utils.RangeNumber(size, 10, maxPageSize)
-
 	page, _ := this.GetInt("page", 1)
 	if page <= 0 {
 		page = 1
 	}
-
-	total, res, err := new(models.Star).List(uid, page, size)
+	total, res, err := new(models.Star).List(uid, page, size, cid)
 	if err != nil {
 		beego.Error(err.Error())
 		this.Response(http.StatusInternalServerError, messageInternalServerError)
@@ -969,6 +1067,10 @@ func (this *CommonController) Bookshelf() {
 	if len(booksId) > 0 {
 		//data["readed"] = new(models.ReadRecord).BooksProgress(uid, booksId...)
 		data["books"] = books
+	}
+
+	if withCate > 0 {
+		data["categories"] = models.NewCategory().CategoryOfUserCollection(uid, true)
 	}
 
 	this.Response(http.StatusOK, messageSuccess, data)
@@ -1028,6 +1130,93 @@ func (this *CommonController) RelatedBook() {
 	data := map[string]interface{}{"books": []string{}}
 	if len(books) > 0 {
 		data["books"] = books
+	}
+	this.Response(http.StatusOK, messageSuccess, data)
+}
+
+// 查询最近阅读过的书籍，返回最近50本
+func (this *CommonController) HistoryReadBook() {
+	page, _ := this.GetInt("page", 1)
+	size, _ := this.GetInt("size", 10)
+	if size <= 0 {
+		size = 10
+	}
+	data := map[string]interface{}{"books": []string{}}
+	uid := this.isLogin()
+	if uid > 0 {
+		books := models.NewReadRecord().HistoryReadBook(uid, page, size)
+		for idx, book := range books {
+			book.Cover = this.completeLink(book.Cover)
+			books[idx] = book
+		}
+		data["books"] = books
+	}
+	this.Response(http.StatusOK, messageSuccess, data)
+}
+
+func (this *CommonController) LatestVersion() {
+	version, _ := strconv.Atoi(models.GetOptionValue("APP_VERSION", "0"))
+	page := models.GetOptionValue("APP_PAGE", "")
+	this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"version": version, "url": page})
+}
+
+func (this *CommonController) Rank() {
+	limit, _ := this.GetInt("limit", 50)
+	if limit > 200 {
+		limit = 200
+	}
+
+	data := make(map[string]interface{})
+
+	tab := this.GetString("tab", "all")
+	switch tab {
+	case "reading":
+		rt := models.NewReadingTime()
+		data["today"] = rt.Sort(models.PeriodDay, limit, true)
+		data["week"] = rt.Sort(models.PeriodWeek, limit, true)
+		data["month"] = rt.Sort(models.PeriodMonth, limit, true)
+		data["last_week"] = rt.Sort(models.PeriodLastWeek, limit, true)
+		data["last_month"] = rt.Sort(models.PeriodLastMoth, limit, true)
+		data["all"] = rt.Sort(models.PeriodAll, limit, true)
+	case "sign":
+		sign := models.NewSign()
+		data["continuous_sign"] = sign.Sorted(limit, "total_continuous_sign", true)
+		data["total_sign"] = sign.Sorted(limit, "total_sign", true)
+		data["this_month_sign"] = sign.SortedByPeriod(limit, models.PeriodMonth, true)
+		data["last_month_sign"] = sign.SortedByPeriod(limit, models.PeriodLastMoth, true)
+		data["history_continuous_sign"] = sign.Sorted(limit, "history_total_continuous_sign", true)
+	case "popular":
+		bookCounter := models.NewBookCounter()
+		data["today"] = bookCounter.PageViewSort(models.PeriodDay, limit, true)
+		data["week"] = bookCounter.PageViewSort(models.PeriodWeek, limit, true)
+		data["month"] = bookCounter.PageViewSort(models.PeriodMonth, limit, true)
+		data["last_week"] = bookCounter.PageViewSort(models.PeriodLastWeek, limit, true)
+		data["last_month"] = bookCounter.PageViewSort(models.PeriodLastMoth, limit, true)
+		data["all"] = bookCounter.PageViewSort(models.PeriodAll, limit, true)
+	case "star":
+		bookCounter := models.NewBookCounter()
+		data["today"] = bookCounter.StarSort(models.PeriodDay, limit, true)
+		data["week"] = bookCounter.StarSort(models.PeriodWeek, limit, true)
+		data["month"] = bookCounter.StarSort(models.PeriodMonth, limit, true)
+		data["last_week"] = bookCounter.StarSort(models.PeriodLastWeek, limit, true)
+		data["last_month"] = bookCounter.StarSort(models.PeriodLastMoth, limit, true)
+		data["all"] = bookCounter.StarSort(models.PeriodAll, limit, true)
+	default:
+		tab = "all"
+		sign := models.NewSign()
+		book := models.NewBook()
+		data["continuous_sign"] = sign.Sorted(limit, "total_continuous_sign", true)
+		data["total_sign"] = sign.Sorted(limit, "total_sign", true)
+		data["star_books"] = book.Sorted(limit, "star")
+		data["vcnt_books"] = book.Sorted(limit, "vcnt")
+		data["comment_books"] = book.Sorted(limit, "cnt_comment")
+		// 这里要适配一下APP端，将错就错的写法，转换一下字段
+		readers := models.NewReadingTime().Sort(models.PeriodAll, limit, true)
+		for idx, reader := range readers {
+			reader.TotalReadingTime = reader.SumTime
+			readers[idx] = reader
+		}
+		data["total_reading"] = readers
 	}
 	this.Response(http.StatusOK, messageSuccess, data)
 }

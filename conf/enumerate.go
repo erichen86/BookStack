@@ -3,6 +3,7 @@ package conf
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/astaxie/beego"
 )
@@ -12,11 +13,11 @@ const LoginSessionName = "LoginSessionName"
 
 const CaptchaSessionName = "__captcha__"
 
-const RegexpEmail = `^(\w)+(\.\w+)*@(\w)+((\.\w+)+)$`
+const RegexpEmail = `(?i)[A-Z0-9._%+-]+@(?:[A-Z0-9-]+\.)+[A-Z]{2,6}`
 
 //允许用户名中出现点号
 
-const RegexpAccount = `[a-zA-z0-9]{2,50}$`
+const RegexpAccount = `^[a-zA-z0-9_]{2,50}$`
 
 // PageSize 默认分页条数.
 const PageSize = 10
@@ -31,7 +32,7 @@ const (
 	MemberAdminRole = 1
 	// 读者.
 	MemberGeneralRole = 2
-	// 作者（可以创建项目）
+	// 作者（可以创建书籍）
 	MemberEditorRole = 3
 )
 
@@ -65,6 +66,24 @@ var (
 	BUILD_TIME string
 	GO_VERSION string
 )
+
+var (
+	AudioExt sync.Map
+	VideoExt sync.Map
+)
+
+// 初始化支持的音视频格式
+func init() {
+	// 音频格式
+	for _, ext := range []string{".flac", ".wma", ".weba", ".aac", ".oga", ".ogg", ".mp3", ".webm", ".mid", ".wav", ".opus", ".m4a", ".amr", ".aiff", ".au"} {
+		AudioExt.Store(ext, true)
+	}
+
+	// 视频格式
+	for _, ext := range []string{".ogm", ".wmv", ".asx", ".mpg", ".webm", ".mp4", ".ogv", ".mpeg", ".mov", ".m4v", ".avi"} {
+		VideoExt.Store(ext, true)
+	}
+}
 
 // app_key
 func GetAppKey() string {
@@ -109,7 +128,17 @@ func GetUploadFileExt() []string {
 }
 
 //判断是否是允许商城的文件类型.
-func IsAllowUploadFileExt(ext string) bool {
+func IsAllowUploadFileExt(ext string, typ ...string) bool {
+	if len(typ) > 0 {
+		t := strings.ToLower(strings.TrimSpace(typ[0]))
+		if t == "audio" {
+			_, ok := AudioExt.Load(ext)
+			return ok
+		} else if t == "video" {
+			_, ok := VideoExt.Load(ext)
+			return ok
+		}
+	}
 
 	if strings.HasPrefix(ext, ".") {
 		ext = string(ext[1:])

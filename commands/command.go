@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"database/sql"
 	"encoding/gob"
 	"flag"
 	"fmt"
@@ -23,7 +24,6 @@ import (
 
 var (
 	ConfigurationFile = "./conf/app.conf"
-	WorkingDirectory  = "./"
 	LogFile           = "./logs"
 )
 
@@ -37,6 +37,17 @@ func RegisterDataBase() {
 
 	port := beego.AppConfig.String("db_port")
 
+	createDB := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s` DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_general_ci", database)
+	conn := fmt.Sprintf("%s:%s@tcp(%s:%s)/", username, password, host, port)
+	db, err := sql.Open("mysql", conn)
+	if err != nil {
+		panic(err)
+	}
+	_, err = db.Exec(createDB)
+	if err != nil {
+		panic(err)
+	}
+
 	dataSource := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&loc=Local", username, password, host, port, database)
 
 	orm.RegisterDataBase("default", "mysql", dataSource)
@@ -44,7 +55,6 @@ func RegisterDataBase() {
 	if beego.AppConfig.String("runmode") == "dev" {
 		orm.Debug = true
 	}
-
 }
 
 // RegisterModel 注册Model
@@ -83,6 +93,12 @@ func RegisterModel() {
 		models.NewWechatCode(),
 		models.NewWechat(),
 		new(models.RegLimit),
+		models.NewAdsPosition(),
+		models.NewAdsCont(),
+		models.NewReadingTime(),
+		models.NewSign(),
+		models.NewBookCounter(),
+		models.NewDownloadCounter(),
 	)
 	migrate.RegisterMigration()
 }
@@ -202,32 +218,26 @@ func RegisterFunction() {
 	beego.AddFuncMap("showImg", utils.ShowImg)
 	beego.AddFuncMap("IsFollow", new(models.Fans).Relation)
 	beego.AddFuncMap("isubstr", utils.Substr)
+	beego.AddFuncMap("ads", models.GetAdsCode)
+	beego.AddFuncMap("formatReadingTime", utils.FormatReadingTime)
+	beego.AddFuncMap("add", func(a, b int) int { return a + b })
 }
 
 func ResolveCommand(args []string) {
 	flagSet := flag.NewFlagSet("MinDoc command: ", flag.ExitOnError)
-	flagSet.StringVar(&ConfigurationFile, "config", "", "MinDoc configuration file.")
-	flagSet.StringVar(&WorkingDirectory, "dir", "", "MinDoc working directory.")
-	flagSet.StringVar(&LogFile, "log", "", "MinDoc log file path.")
+	flagSet.StringVar(&ConfigurationFile, "config", "", "BookStack configuration file.")
+	flagSet.StringVar(&LogFile, "log", "", "BookStack log file path.")
 
 	flagSet.Parse(args)
 
-	if WorkingDirectory == "" {
-		if p, err := filepath.Abs(os.Args[0]); err == nil {
-			WorkingDirectory = filepath.Dir(p)
-		}
-	}
-	if LogFile == "" {
-		LogFile = filepath.Join(WorkingDirectory, "logs")
-	}
 	if ConfigurationFile == "" {
-		ConfigurationFile = filepath.Join(WorkingDirectory, "conf", "app.conf")
-		config := filepath.Join(WorkingDirectory, "conf", "app.conf.example")
+		ConfigurationFile = filepath.Join("conf", "app.conf")
+		config := filepath.Join("conf", "app.conf.example")
 		if !utils.FileExists(ConfigurationFile) && utils.FileExists(config) {
 			utils.CopyFile(ConfigurationFile, config)
 		}
 	}
-	gocaptcha.ReadFonts(filepath.Join(WorkingDirectory, "static", "fonts"), ".ttf")
+	gocaptcha.ReadFonts(filepath.Join("static", "fonts"), ".ttf")
 
 	err := beego.LoadAppConfig("ini", ConfigurationFile)
 
@@ -235,20 +245,20 @@ func ResolveCommand(args []string) {
 		log.Println("An error occurred:", err)
 		os.Exit(1)
 	}
-	uploads := filepath.Join(WorkingDirectory, "uploads")
+	uploads := filepath.Join("uploads")
 
 	os.MkdirAll(uploads, 0666)
 
-	beego.BConfig.WebConfig.StaticDir["/static"] = filepath.Join(WorkingDirectory, "static")
-	beego.BConfig.WebConfig.StaticDir["/uploads"] = uploads
-	beego.BConfig.WebConfig.ViewsPath = filepath.Join(WorkingDirectory, "views")
+	beego.BConfig.WebConfig.StaticDir["/static"] = filepath.Join("static")
+	// beego.BConfig.WebConfig.StaticDir["/uploads"] = uploads
+	beego.BConfig.WebConfig.ViewsPath = filepath.Join("views")
 
-	fonts := filepath.Join(WorkingDirectory, "static", "fonts")
+	fonts := filepath.Join("static", "fonts")
 
 	if !utils.FileExists(fonts) {
 		log.Fatal("Font path not exist.")
 	}
-	gocaptcha.ReadFonts(filepath.Join(WorkingDirectory, "static", "fonts"), ".ttf")
+	gocaptcha.ReadFonts(filepath.Join("static", "fonts"), ".ttf")
 
 	RegisterDataBase()
 	RegisterModel()
@@ -260,8 +270,4 @@ func init() {
 
 	gocaptcha.ReadFonts("./static/fonts", ".ttf")
 	gob.Register(models.Member{})
-
-	if p, err := filepath.Abs(os.Args[0]); err == nil {
-		WorkingDirectory = filepath.Dir(p)
-	}
 }

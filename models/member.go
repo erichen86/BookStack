@@ -19,23 +19,29 @@ import (
 
 // member
 type Member struct {
-	MemberId      int       `orm:"pk;auto;column(member_id)" json:"member_id"`
-	Account       string    `orm:"size(30);unique;column(account)" json:"account"`
-	Nickname      string    `orm:"size(30);unique;column(nickname)" json:"nickname"` //昵称
-	Password      string    `orm:"column(password);size(512)" json:"-"`
-	AuthMethod    string    `orm:"column(auth_method);default(local);size(50);" json:"auth_method"` //认证方式: local 本地数据库 /ldap LDAP
-	Description   string    `orm:"column(description);size(2000)" json:"description"`
-	Email         string    `orm:"size(100);column(email);unique" json:"email"`
-	Phone         string    `orm:"size(255);column(phone);null;default(null)" json:"phone"`
-	Avatar        string    `orm:"column(avatar)" json:"avatar"`
-	Role          int       `orm:"column(role);type(int);default(1);index" json:"role"` //用户角色：0 超级管理员 /1 管理员/ 2 普通用户 .
-	RoleName      string    `orm:"-" json:"role_name"`
-	Status        int       `orm:"column(status);type(int);default(0)" json:"status"` //用户状态：0 正常/1 禁用
-	CreateTime    time.Time `orm:"type(datetime);column(create_time);auto_now_add" json:"create_time"`
-	CreateAt      int       `orm:"type(int);column(create_at)" json:"create_at"`
-	LastLoginTime time.Time `orm:"type(datetime);column(last_login_time);null" json:"last_login_time"`
-	Wxpay         string    `json:"wxpay"`  //微信支付的收款二维码
-	Alipay        string    `json:"alipay"` //支付宝支付的收款二维码
+	MemberId                   int       `orm:"pk;auto;column(member_id)" json:"member_id"`
+	Account                    string    `orm:"size(30);unique;column(account)" json:"account"`
+	Nickname                   string    `orm:"size(30);unique;column(nickname)" json:"nickname"` //昵称
+	Password                   string    `orm:"column(password);size(512)" json:"-"`
+	AuthMethod                 string    `orm:"column(auth_method);default(local);size(50);" json:"auth_method"` //认证方式: local 本地数据库 /ldap LDAP
+	Description                string    `orm:"column(description);size(2000)" json:"description"`
+	Email                      string    `orm:"size(100);column(email);unique" json:"email"`
+	Phone                      string    `orm:"size(255);column(phone);null;default(null)" json:"phone"`
+	Avatar                     string    `orm:"column(avatar)" json:"avatar"`
+	Role                       int       `orm:"column(role);type(int);default(1);index" json:"role"` //用户角色：0 超级管理员 /1 管理员/ 2 普通用户 .
+	RoleName                   string    `orm:"-" json:"role_name"`
+	Status                     int       `orm:"column(status);type(int);default(0)" json:"status"` //用户状态：0 正常/1 禁用
+	CreateTime                 time.Time `orm:"type(datetime);column(create_time);auto_now_add" json:"create_time"`
+	CreateAt                   int       `orm:"type(int);column(create_at)" json:"create_at"`
+	LastLoginTime              time.Time `orm:"type(datetime);column(last_login_time);null" json:"last_login_time"`
+	Wxpay                      string    `json:"wxpay"`                                                // 微信支付的收款二维码
+	Alipay                     string    `json:"alipay"`                                               // 支付宝支付的收款二维码
+	TotalReadingTime           int       `json:"total_reading_time" orm:"default(0)"`                  // 总阅读时长
+	TotalSign                  int       `json:"total_sign" orm:"default(0);index"`                    // 总签到天数
+	TotalContinuousSign        int       `json:"total_continuous_sign" orm:"default(0);index"`         // 总连续签到天数
+	HistoryTotalContinuousSign int       `json:"history_total_continuous_sign" orm:"default(0);index"` // 历史最高连续签到天数
+	WechatNO                   string    `json:"wechat_no" orm:"column(wechat_no);size(50)"`           // 微信号
+	NoRank                     bool      `json:"no_rank" orm:"default(0);index"`                       // 是否禁止榜单排行
 }
 
 // TableName 获取对应数据库表名.
@@ -58,11 +64,17 @@ func NewMember() *Member {
 
 // Login 用户登录.
 func (m *Member) Login(account string, password string) (*Member, error) {
+	var err error
 	o := orm.NewOrm()
 
 	member := &Member{}
+	if strings.Contains(account, "@") {
+		err = o.QueryTable(m.TableNameWithPrefix()).Filter("email", account).Filter("status", 0).One(member)
+	}
 
-	err := o.QueryTable(m.TableNameWithPrefix()).Filter("account", account).Filter("status", 0).One(member)
+	if err != nil || member.MemberId == 0 {
+		err = o.QueryTable(m.TableNameWithPrefix()).Filter("account", account).Filter("status", 0).One(member)
+	}
 
 	if err != nil {
 		beego.Error("用户登录 => " + err.Error())
@@ -214,14 +226,20 @@ func (m *Member) Update(cols ...string) error {
 	return nil
 }
 
-func (m *Member) Find(id int) (*Member, error) {
+func (m *Member) Find(id int, cols ...string) (*Member, error) {
 	o := orm.NewOrm()
 	m.MemberId = id
-	if err := o.Read(m); err != nil {
+	err := o.QueryTable(m).Filter("member_id", id).One(m, cols...)
+	if err != nil {
 		return m, err
 	}
 	m.ResolveRoleName()
 	return m, nil
+}
+
+func (m *Member) FindByNickname(nickname string, cols ...string) (user Member) {
+	orm.NewOrm().QueryTable(m).Filter("nickname", nickname).One(&user, cols...)
+	return
 }
 
 func (m *Member) ResolveRoleName() {
@@ -362,95 +380,79 @@ func (m *Member) Valid(isHashPassword bool) error {
 
 //删除一个用户.
 
-func (m *Member) Delete(oldId int, newId int) error {
+func (m *Member) Delete(oldId int, adminId int) (err error) {
 	o := orm.NewOrm()
-
-	err := o.Begin()
-
+	err = o.Begin()
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			o.Rollback()
+		} else {
+			o.Commit()
+		}
+	}()
 
 	_, err = o.Raw("DELETE FROM md_members WHERE member_id = ?", oldId).Exec()
 	if err != nil {
-		o.Rollback()
-		return err
-	}
-	_, err = o.Raw("UPDATE md_attachment SET `create_at` = ? WHERE `create_at` = ?", newId, oldId).Exec()
-
-	if err != nil {
-		o.Rollback()
-		return err
+		return
 	}
 
-	_, err = o.Raw("UPDATE md_books SET member_id = ? WHERE member_id = ?", newId, oldId).Exec()
-	if err != nil {
-		o.Rollback()
-		return err
+	var books []Book
+	o.QueryTable("md_books").Filter("member_id", oldId).Limit(10000000).All(&books, "book_id")
+
+	if len(books) > 0 {
+		var booksId []interface{}
+
+		for _, book := range books {
+			booksId = append(booksId, book.BookId)
+		}
+
+		_, err = o.Raw("UPDATE md_books SET member_id = ? WHERE member_id = ?", adminId, oldId).Exec()
+		if err != nil {
+			return
+		}
+
+		_, err = o.Raw("UPDATE md_document_history SET member_id=? WHERE member_id = ?", adminId, oldId).Exec()
+		if err != nil {
+			return err
+		}
+
+		_, err = o.QueryTable("md_documents").Filter("book_id__in", booksId...).Update(orm.Params{"member_id": adminId})
+		if err != nil {
+			return err
+		}
 	}
-	_, err = o.Raw("UPDATE md_document_history SET member_id=? WHERE member_id = ?", newId, oldId).Exec()
-	if err != nil {
-		o.Rollback()
-		return err
-	}
-	_, err = o.Raw("UPDATE md_document_history SET modify_at=? WHERE modify_at = ?", newId, oldId).Exec()
-	if err != nil {
-		o.Rollback()
-		return err
-	}
-	_, err = o.Raw("UPDATE md_documents SET member_id = ? WHERE member_id = ?;", newId, oldId).Exec()
-	if err != nil {
-		o.Rollback()
-		return err
-	}
-	_, err = o.Raw("UPDATE md_documents SET modify_at = ? WHERE modify_at = ?", newId, oldId).Exec()
-	if err != nil {
-		o.Rollback()
-		return err
-	}
-	//_,err = o.Raw("UPDATE md_relationship SET member_id = ? WHERE member_id = ?",newId,oldId).Exec()
-	//if err != nil {
-	//
-	//	if err != nil {
-	//		o.Rollback()
-	//		return err
-	//	}
-	//}
+
 	var relationshipList []*Relationship
 
 	_, err = o.QueryTable(NewRelationship().TableNameWithPrefix()).Filter("member_id", oldId).All(&relationshipList)
-
 	if err == nil {
 		for _, relationship := range relationshipList {
 			//如果存在创始人，则删除
 			if relationship.RoleId == 0 {
 				rel := NewRelationship()
-
-				err = o.QueryTable(relationship.TableNameWithPrefix()).Filter("book_id", relationship.BookId).Filter("member_id", newId).One(rel)
+				err = o.QueryTable(relationship.TableNameWithPrefix()).Filter("book_id", relationship.BookId).Filter("member_id", adminId).One(rel)
 				if err == nil {
-					if _, err := o.Delete(relationship); err != nil {
+					if _, err = o.Delete(relationship); err != nil {
 						beego.Error(err)
 					}
 					relationship.RelationshipId = rel.RelationshipId
 				}
-				relationship.MemberId = newId
+				relationship.MemberId = adminId
 				relationship.RoleId = 0
-				if _, err := o.Update(relationship); err != nil {
+				if _, err = o.Update(relationship); err != nil {
 					beego.Error(err)
 				}
 			} else {
-				if _, err := o.Delete(relationship); err != nil {
+				if _, err = o.Delete(relationship); err != nil {
 					beego.Error(err)
 				}
 			}
 		}
 	}
-
-	if err = o.Commit(); err != nil {
-		o.Rollback()
-		return err
-	}
-	return nil
+	return
 }
 
 //获取用户名
@@ -485,7 +487,8 @@ func (this *Member) GetByUsername(username string) (member Member, err error) {
 	q := orm.NewOrm().QueryTable("md_members")
 	if strings.Contains(username, "@") { //存在 @ 符号的表示邮箱，因为用户名只有数字和字母
 		err = q.Filter("email", username).One(&member)
-	} else {
+	}
+	if err != nil || member.MemberId == 0 {
 		err = q.Filter("account", username).One(&member)
 	}
 	return

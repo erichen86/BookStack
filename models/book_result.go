@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"strconv"
@@ -46,6 +47,8 @@ type BookResult struct {
 	IsDisplayComment bool   `json:"is_display_comment"`
 	Author           string `json:"author"`
 	AuthorURL        string `json:"author_url"`
+	AdTitle          string `json:"ad_title"`
+	AdLink           string `json:"ad_link"`
 	Lang             string `json:"lang"`
 }
 
@@ -53,7 +56,7 @@ func NewBookResult() *BookResult {
 	return &BookResult{}
 }
 
-// 根据项目标识查询项目以及指定用户权限的信息.
+// 根据书籍标识查询书籍以及指定用户权限的信息.
 func (m *BookResult) FindByIdentify(identify string, memberId int) (result *BookResult, err error) {
 	if identify == "" || memberId <= 0 {
 		return result, ErrInvalidParameter
@@ -76,9 +79,9 @@ func (m *BookResult) FindByIdentify(identify string, memberId int) (result *Book
 
 	var relationship2 Relationship
 
-	err = o.QueryTable(relationship.TableNameWithPrefix()).Filter("book_id", book.BookId).Filter("role_id", 0).One(&relationship2)
+	err = o.QueryTable(relationship.TableNameWithPrefix()).Filter("book_id", book.BookId).Filter("role_id", conf.BookFounder).One(&relationship2)
 	if err != nil {
-		logs.Error("根据项目标识查询项目以及指定用户权限的信息 => ", err)
+		logs.Error("根据书籍标识查询书籍以及指定用户权限的信息 => ", err)
 		return result, ErrPermissionDenied
 	}
 
@@ -116,14 +119,23 @@ func (m *BookResult) FindByIdentify(identify string, memberId int) (result *Book
 	return
 }
 
-func (m *BookResult) FindToPager(pageIndex, pageSize int, private ...int) (books []*BookResult, totalCount int, err error) {
-	o := orm.NewOrm()
-	pri := 0
-	if len(private) > 0 {
-		pri = private[0]
+func (m *BookResult) FindToPager(pageIndex, pageSize int, private int, wd ...string) (books []*BookResult, totalCount int, err error) {
+	var args []interface{}
+	word := ""
+	if len(wd) > 0 {
+		if w := strings.TrimSpace(wd[0]); w != "" {
+			word = w
+		}
 	}
+	o := orm.NewOrm()
+	q := o.QueryTable(NewBook().TableNameWithPrefix())
+	if word != "" {
+		cond := orm.NewCondition().Or("book_name__icontains", word).Or("description__icontains", word)
+		q = q.SetCond(orm.NewCondition().AndCond(cond))
+	}
+	q = q.Filter("privately_owned", private)
 
-	count, err := o.QueryTable(NewBook().TableNameWithPrefix()).Filter("privately_owned", pri).Count()
+	count, err := q.Count()
 	if err != nil {
 		return
 	}
@@ -137,11 +149,15 @@ func (m *BookResult) FindToPager(pageIndex, pageSize int, private ...int) (books
 			LEFT JOIN md_members AS m ON rel.member_id = m.member_id %v
 		ORDER BY book.order_index DESC ,book.book_id DESC  LIMIT ?,?`
 	condition := ""
-	if len(private) > 0 {
-		condition = "where book.privately_owned=" + strconv.Itoa(pri)
+	condition = "where book.privately_owned=" + strconv.Itoa(private)
+	if word != "" {
+		condition = condition + " and (book.book_name like ? or book.description like ?)"
+		args = append(args, "%"+word+"%", "%"+word+"%")
 	}
+
 	sql = fmt.Sprintf(sql, condition)
 	offset := (pageIndex - 1) * pageSize
-	_, err = o.Raw(sql, offset, pageSize).QueryRows(&books)
+	args = append(args, offset, pageSize)
+	_, err = o.Raw(sql, args...).QueryRows(&books)
 	return
 }

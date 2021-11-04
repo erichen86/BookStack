@@ -82,10 +82,31 @@ function alertTips(cls,msg,timeout,url) {
     },parseInt(timeout));
 }
 
+// 上传文件
+function upload(url, formData, callback){
+    // var formData = new FormData();
+    // formData.append('xxx name', 'xxx value')
+    $.ajax({
+        type: "POST",
+        url: url,
+        data: formData ,　　//这里上传的数据使用了formData 对象
+        processData : false,
+        //必须false才会自动加上正确的Content-Type
+        contentType : false ,
+        //这里我们先拿到jQuery产生的 XMLHttpRequest对象，为其增加 progress 事件绑定，然后再返回交给ajax使用
+        success:function (res) {
+            callback(res)
+        },
+        error:function (e) {
+            callback(e)
+        }
+    });
+}
+
 $(function () {
     $(".tooltips").tooltip();
 
-    //文档项目评分
+    //书籍评分
     if($("body").attr("id")=="bookstack-intro"){
         var stars=$(".cursor-pointer .fa")
         $(".cursor-pointer .fa").hover(function () {
@@ -174,14 +195,20 @@ $(function () {
     //ajax-get
     $(document).on("click",".ajax-get",function (e) {
         e.preventDefault();
-        if($(this).hasClass("confirm") && !confirm("您确定要执行该操作吗？")){
+        var _this = $(this)
+        if(_this.hasClass("confirm") && !confirm("您确定要执行该操作吗？")){
             return true;
         }
         var _url=$(this).attr("href"),_this=$(this);
         $.get(_url,function (ret) {
             ret=parseJson(ret);
             if(ret.errcode==0){//操作成功
-                alertTips("success",ret.message,3000,location.href);
+                var parent = _this.parents(".rm-ajax-get")
+                if (parent && parent.length>0){
+                    parent.remove()
+                }else{
+                    alertTips("success",ret.message,3000,location.href);
+                }
             }else{
                 alertTips("danger",ret.message,3000,"");
             }
@@ -279,12 +306,25 @@ $(function () {
         form.find("[name=id]").val($(this).attr("data-id"));
         form.find("[name=icon]").trigger("click");
     })
+
     $("#cate-icon").change(function () {
-       if($(this).val()!=""){
-           $("form.cate-icon-form").submit();
+        var _this = $(this),action = _this.parents("form").attr("action");
+       if(_this.val()!=""){
+           var formData = new FormData();
+           var id = _this.parents("form").find("[name=id]").val()
+            formData.append('icon', _this.get(0).files[0])
+            formData.append('id', id)
+            upload(action, formData, function(res){
+                if(res.errcode==0){ // 成功
+                    alertTips('success', res.message, 3000, "");
+                    $("[data-id="+id+"]").attr("src", res.data.icon)
+                }else{ // 失败
+                    alertTips('error', res.message, 3000, "")
+                }
+                _this.val('')
+            })
        }
     });
-
 
     $("#notarget").load(function () {
         var obj=JSON.parse($(this).contents().find('body').text());
